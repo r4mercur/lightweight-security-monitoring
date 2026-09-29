@@ -1,0 +1,93 @@
+# Helm values for Fluent Bit (https://fluent.github.io/helm-charts), installed
+# in the namespace "logging". If you already run Fluent Bit (e.g. for Loki or
+# Elasticsearch), add these inputs/filters/output to your existing values.
+#
+# Needs the secret:
+#   kubectl -n logging create secret generic security-monitor-api-key --from-literal=api-key=<key>
+
+env:
+  - name: SECURITY_MONITOR_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: security-monitor-api-key
+        key: api-key
+
+config:
+  inputs: |
+    # Access logs of the ingress controller (written in the event format, see ingress-nginx-values.yaml).
+    [INPUT]
+        Name              tail
+        Tag               secmon.ingress.*
+        Path              /var/log/containers/*_ingress-nginx_controller-*.log
+        multiline.parser  docker, cri
+        Mem_Buf_Limit     20MB
+        Skip_Long_Lines   On
+        Refresh_Interval  5
+
+    # Optional "DNS kit": CoreDNS query log (enable the CoreDNS "log" plugin first).
+    [INPUT]
+        Name              tail
+        Tag               secmon.dns.*
+        Path              /var/log/containers/coredns-*_kube-system_coredns-*.log
+        multiline.parser  docker, cri
+        Mem_Buf_Limit     20MB
+        Skip_Long_Lines   On
+        Refresh_Interval  5
+
+  customParsers: |
+    # [INFO] 10.244.1.7:41237 - 36502 "A IN example.com. udp 40 false 1232" NOERROR qr,rd,ra 94 0.0001s
+    [PARSER]
+        Name    coredns_query
+        Format  regex
+        Regex   ^\[INFO\] \[?(?<ip>[^\]\s]+?)\]?:\d+ - \d+ "(?<query_type>\S+) IN (?<domain>\S+)
+
+  filters: |
+    # Ingress: the log line is already a complete event; keep only access log
+    # lines (the controller also logs errors in other formats).
+    [FILTER]
+        Name          parser
+        Match         secmon.ingress.*
+        Key_Name      log
+        Parser        json
+        Reserve_Data  Off
+    [FILTER]
+        Name   grep
+        Match  secmon.ingress.*
+        Regex  event_type ^http_request$
+
+    # DNS: turn query log lines into dns_query events, drop everything else.
+    [FILTER]
+        Name          parser
+        Match         secmon.dns.*
+        Key_Name      log
+        Parser        coredns_query
+        Reserve_Data  Off
+    [FILTER]
+        Name   grep
+        Match  secmon.dns.*
+        Regex  domain .
+    [FILTER]
+        Name   modify
+        Match  secmon.dns.*
+        Add    event_type dns_query
+    [FILTER]
+        Name        nest
+        Match       secmon.dns.*
+        Operation   nest
+        Wildcard    query_type
+        Nest_under  metadata
+
+  outputs: |
+    [OUTPUT]
+        Name           http
+        Match          secmon.*
+        Host           security-monitor.security.svc.cluster.local
+        Port           8080
+        URI            /events/batch
+        Format         json
+        json_date_key  false
+        Header         Authorization Bearer ${SECURITY_MONITOR_API_KEY}
+        Retry_Limit    5
+        # The response lists the generated alerts; keep them out of Fluent Bit's
+        # own log (which your logging stack would otherwise collect).
+        log_response_payload false

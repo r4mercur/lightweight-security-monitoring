@@ -1,0 +1,41 @@
+# Only the log shipper, labelled application namespaces and Prometheus may talk
+# to the monitor. Requires a CNI that enforces NetworkPolicies (Calico, Cilium, …).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: security-monitor
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: security-monitor
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: logging # Fluent Bit
+        - namespaceSelector:
+            matchLabels:
+              security-monitor/client: "true" # namespaces whose services send events
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring # Prometheus scraping /metrics
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    - to: # DNS
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports: # AI provider API over HTTPS; remove if AI analysis is not used
+        - port: 443
+          protocol: TCP

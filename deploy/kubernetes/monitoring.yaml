@@ -1,0 +1,65 @@
+# Optional: Prometheus Operator (e.g. kube-prometheus-stack). Add to
+# kustomization.yaml once the ServiceMonitor/PrometheusRule CRDs exist.
+# The label "release: kube-prometheus-stack" must match your Prometheus'
+# serviceMonitorSelector / ruleSelector.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: security-monitor
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: security-monitor
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: security-monitor
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: security-monitor
+      rules:
+        # Attacks. Details: GET /alerts on the monitor.
+        - alert: SecurityAlertCritical
+          expr: increase(security_alerts_total{severity="critical"}[5m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "Critical security alert (e.g. command injection, multi-vector attack)"
+        - alert: SecurityAlertHigh
+          expr: increase(security_alerts_total{severity="high"}[5m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "High-severity security alerts in the last 5 minutes"
+
+        # The monitor itself. A silent monitor is worse than a noisy one.
+        - alert: SecurityMonitorNoEvents
+          expr: sum(rate(security_events_total[15m])) == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Security monitor received no events for 15 minutes - check the log shipper"
+        - alert: SecurityMonitorDown
+          expr: absent(up{job="security-monitor"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Security monitor is not reachable"
+        - alert: SecurityMonitorEvictingEarly
+          expr: increase(storage_evictions_total{kind="event",reason="capacity"}[1h]) > 0
+          for: 1h
+          labels:
+            severity: info
+          annotations:
+            summary: "Events are evicted before their retention ends - consider raising MAX_EVENTS"

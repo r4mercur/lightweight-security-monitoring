@@ -1,0 +1,84 @@
+# Demo landscape for trying the setup on a local cluster (kind, minikube):
+# a namespace "shop" with two tiny microservices behind one ingress.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+  labels:
+    security-monitor/client: "true" # may send events to the monitor (NetworkPolicy)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: frontend }
+  template:
+    metadata:
+      labels: { app: frontend }
+    spec:
+      containers:
+        - name: frontend
+          image: hashicorp/http-echo:1.0
+          args: ["-text=shop frontend", "-listen=:8080"]
+          ports: [{ containerPort: 8080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: api }
+  template:
+    metadata:
+      labels: { app: api }
+    spec:
+      containers:
+        - name: api
+          image: hashicorp/http-echo:1.0
+          args: ["-text={\"status\":\"ok\"}", "-listen=:8080"]
+          ports: [{ containerPort: 8080 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: shop
+spec:
+  selector: { app: frontend }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: shop
+spec:
+  selector: { app: api }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service: { name: api, port: { number: 80 } }
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: frontend, port: { number: 80 } }

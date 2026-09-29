@@ -1,0 +1,266 @@
+{
+  "default_cooldown": "1m",
+  "rules": [
+    {
+      "name": "CommandInjection",
+      "kind": "signature",
+      "description": "Command injection / RCE attempt",
+      "severity": "critical",
+      "alert_type": "command_injection",
+      "fields": ["path", "message", "user_agent"],
+      "contains": ["${jndi:", "${${", "/bin/sh", "/bin/bash", "cmd.exe /c", "powershell -e", "nc -e "],
+      "regex": [
+        "(;|\\|\\|?|&&|\\n)\\s*(id|whoami|uname|cat|ls|wget|curl|nc|ncat|bash|sh|ping|nslookup|powershell)(\\s|$|;|\\|)",
+        "\\$\\(\\s*(id|whoami|uname|cat|ls|wget|curl|nc|bash|sh|ping|nslookup)\\b",
+        "`(id|whoami|uname|cat|ls|wget|curl|nc|bash|sh|ping|nslookup)\\b"
+      ]
+    },
+    {
+      "name": "SQLInjection",
+      "kind": "signature",
+      "description": "Potential SQL injection",
+      "severity": "high",
+      "alert_type": "sql_injection",
+      "fields": ["path", "message"],
+      "regex": [
+        "'\\s*(or|and)\\s*('|\"|\\d|true\\b|false\\b|\\()",
+        "\\b(or|and)\\s+\\d+\\s*=\\s*\\d+",
+        "\\bunion\\b.{0,30}\\bselect\\b",
+        ";\\s*(drop|delete|insert|update|truncate|alter|create|exec)\\s",
+        "\\bdrop\\s+(table|database)\\b",
+        "\\b(sleep|benchmark|pg_sleep)\\s*\\(",
+        "\\bwaitfor\\s+delay\\b",
+        "'\\s*(--|#|/\\*)",
+        "\\b(xp_cmdshell|information_schema|load_file|into\\s+outfile)\\b"
+      ]
+    },
+    {
+      "name": "PathTraversal",
+      "kind": "signature",
+      "description": "Path traversal / local file inclusion attempt",
+      "severity": "high",
+      "alert_type": "path_traversal",
+      "fields": ["path", "message"],
+      "contains": [
+        "../", "..\\", "..;/", "%c0%ae", "%c0%af",
+        "etc/passwd", "etc/shadow", "/proc/self/", "win.ini", "boot.ini", "c:\\windows"
+      ]
+    },
+    {
+      "name": "SSRF",
+      "kind": "signature",
+      "description": "Server-side request forgery attempt",
+      "severity": "high",
+      "alert_type": "ssrf",
+      "fields": ["path", "message"],
+      "contains": [
+        "169.254.169.254", "metadata.google.internal", "100.100.100.200", "fd00:ec2::254",
+        "file://", "gopher://", "dict://"
+      ],
+      "regex": [
+        "=\\s*https?://(localhost|127\\.\\d+\\.\\d+\\.\\d+|0\\.0\\.0\\.0|\\[::1?\\])"
+      ]
+    },
+    {
+      "name": "XSS",
+      "kind": "signature",
+      "description": "Cross-site scripting attempt",
+      "severity": "medium",
+      "alert_type": "xss",
+      "fields": ["path", "message"],
+      "contains": ["<script", "</script", "javascript:", "vbscript:", "document.cookie", "<iframe", "<svg"],
+      "regex": [
+        "\\bon(error|load|mouseover|focus|click|toggle|animationstart)\\s*="
+      ]
+    },
+    {
+      "name": "ScannerUserAgent",
+      "kind": "signature",
+      "description": "Request from a known attack/scanning tool",
+      "severity": "medium",
+      "alert_type": "reconnaissance",
+      "fields": ["user_agent"],
+      "contains": [
+        "sqlmap", "nikto", "nmap", "masscan", "zgrab", "nuclei", "gobuster", "dirbuster", "dirb/",
+        "feroxbuster", "ffuf", "wfuzz", "wpscan", "hydra", "acunetix", "nessus", "openvas",
+        "netsparker", "whatweb", "commix", "xsstrike", "zmeu"
+      ]
+    },
+    {
+      "name": "SuspiciousOutboundPort",
+      "kind": "signature",
+      "description": "Outbound connection to a port typical for backdoors, IRC or Tor",
+      "severity": "medium",
+      "alert_type": "command_and_control",
+      "when": {
+        "event_types": ["network_connection", "firewall_block"],
+        "match": { "direction": ["outbound"] }
+      },
+      "fields": ["port"],
+      "regex": ["^(4444|4445|1337|31337|6666|6667|6697|9001|9030|9050|9150)$"],
+      "reason": "{description}: {ip} ({event.metadata.process}) -> {event.dst_ip}:{event.port}"
+    },
+    {
+      "name": "LongDNSLabel",
+      "kind": "signature",
+      "description": "DNS query with an unusually long label (possible data encoded in the name)",
+      "severity": "medium",
+      "alert_type": "dns_tunneling",
+      "when": { "event_types": ["dns_query"] },
+      "fields": ["domain"],
+      "regex": ["(^|\\.)[a-z0-9_-]{50,}\\."],
+      "reason": "{description}: {ip} queried {event.domain}"
+    },
+    {
+      "name": "SensitivePath",
+      "kind": "signature",
+      "description": "Access to sensitive path",
+      "severity": "medium",
+      "alert_type": "unusual_access",
+      "fields": ["path"],
+      "paths": [
+        "/admin", "/administrator", "/wp-admin", "/wp-login.php", "/xmlrpc.php", "/phpmyadmin", "/pma",
+        "/.env", "/.git", "/.svn", "/.hg", "/.aws", "/.ssh", "/.htaccess", "/.htpasswd", "/.ds_store",
+        "/.npmrc", "/.idea", "/.vscode", "/id_rsa", "/web.config",
+        "/config", "/backup", "/phpinfo", "/server-status", "/server-info",
+        "/actuator", "/vendor/phpunit", "/cgi-bin", "/console", "/debug", "/manager/html"
+      ]
+    },
+    {
+      "name": "PortScan",
+      "kind": "threshold",
+      "description": "Port scan detected",
+      "severity": "high",
+      "alert_type": "port_scan",
+      "when": {
+        "except": [
+          { "event_type": ["network_connection"], "direction": ["outbound"] },
+          { "event_type": ["port_opened"] }
+        ]
+      },
+      "distinct": "port",
+      "threshold": 10,
+      "window": "1m"
+    },
+    {
+      "name": "NetworkSweep",
+      "kind": "threshold",
+      "description": "Network sweep (many destination hosts)",
+      "severity": "high",
+      "alert_type": "reconnaissance",
+      "when": {
+        "except": [
+          { "event_type": ["network_connection"], "direction": ["outbound"] }
+        ]
+      },
+      "distinct": "dst_ip",
+      "threshold": 10,
+      "window": "1m"
+    },
+    {
+      "name": "DNSTunneling",
+      "kind": "threshold",
+      "description": "Possible DNS tunneling / exfiltration",
+      "severity": "high",
+      "alert_type": "dns_tunneling",
+      "when": {
+        "event_types": ["dns_query"],
+        "except": [{ "metadata.base_domain": ["in-addr.arpa", "ip6.arpa"] }]
+      },
+      "distinct": "domain",
+      "group_by": "metadata.base_domain",
+      "threshold": 50,
+      "window": "1m",
+      "reason": "{description}: {count} distinct subdomains of {group} queried by {ip} within {window}"
+    },
+    {
+      "name": "Beaconing",
+      "kind": "beacon",
+      "description": "Periodic outbound connections (possible command-and-control beacon)",
+      "severity": "medium",
+      "alert_type": "command_and_control",
+      "when": {
+        "event_types": ["network_connection"],
+        "match": { "direction": ["outbound"] },
+        "except": [{ "dst_ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"] }]
+      },
+      "group_by": "dst_ip",
+      "threshold": 6,
+      "window": "2h",
+      "min_interval": "10s",
+      "max_jitter": 0.15,
+      "cooldown": "1h",
+      "reason": "{description}: {ip} ({event.metadata.process}) contacted {group}:{event.port} {count} times every ~{interval} (jitter {jitter})"
+    },
+    {
+      "name": "NewListeningPort",
+      "kind": "threshold",
+      "description": "New listening port",
+      "severity": "low",
+      "when": { "event_types": ["port_opened"] },
+      "threshold": 1,
+      "window": "1m",
+      "cooldown": "0s",
+      "reason": "{description}: {event.protocol} port {event.port} on {ip} opened by {event.metadata.process}"
+    },
+    {
+      "name": "BlockedConnectionFlood",
+      "kind": "threshold",
+      "description": "Flood of blocked connections",
+      "severity": "medium",
+      "alert_type": "firewall_block",
+      "when": { "event_types": ["firewall_block"] },
+      "threshold": 100,
+      "window": "1m"
+    },
+    {
+      "name": "BruteForce",
+      "kind": "threshold",
+      "description": "Brute-force detected",
+      "severity": "high",
+      "when": { "event_types": ["failed_login"] },
+      "threshold": 5,
+      "window": "1m",
+      "reason": "Brute-force detected: {count} failed login attempts from {ip} within {window}"
+    },
+    {
+      "name": "DirectoryEnumeration",
+      "kind": "threshold",
+      "description": "Directory enumeration (many 404 responses)",
+      "severity": "medium",
+      "alert_type": "reconnaissance",
+      "when": { "status_codes": [404] },
+      "threshold": 15,
+      "window": "1m"
+    },
+    {
+      "name": "AccessDeniedFlood",
+      "kind": "threshold",
+      "description": "Repeated access denied (401/403) responses",
+      "severity": "medium",
+      "alert_type": "unusual_access",
+      "when": { "status_codes": [401, 403] },
+      "threshold": 10,
+      "window": "1m"
+    },
+    {
+      "name": "RapidFire",
+      "kind": "threshold",
+      "description": "Unusual traffic volume",
+      "severity": "medium",
+      "when": { "event_types": ["http_request"] },
+      "threshold": 20,
+      "window": "30s",
+      "reason": "Unusual traffic volume: {count} requests from {ip} in {window}"
+    },
+    {
+      "name": "MultiVector",
+      "kind": "correlation",
+      "description": "Multi-vector attack",
+      "severity": "critical",
+      "alert_type": "multi_vector",
+      "threshold": 3,
+      "window": "10m"
+    }
+  ]
+}

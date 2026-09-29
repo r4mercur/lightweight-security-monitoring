@@ -1,0 +1,25 @@
+# Helm values for ingress-nginx (https://kubernetes.github.io/ingress-nginx).
+# Merge into your existing values if the controller is already installed.
+controller:
+  config:
+    # Write access logs directly in the security monitor's event format, so the
+    # log shipper only forwards them. $namespace/$ingress_name/$service_name say
+    # which microservice was targeted.
+    log-format-escape-json: "true"
+    log-format-upstream: '{"timestamp":"$time_iso8601","ip":"$remote_addr","event_type":"http_request","path":"$request_uri","status_code":$status,"user_agent":"$http_user_agent","message":"$request","metadata":{"method":"$request_method","host":"$host","referer":"$http_referer","namespace":"$namespace","ingress":"$ingress_name","service":"$service_name","source":"ingress-nginx"}}'
+
+    # IMPORTANT: $remote_addr must be the real client, not the load balancer.
+    # Otherwise all traffic comes from one IP and per-IP rules are useless.
+    # Pick what matches your load balancer:
+    #
+    # a) L4 load balancer that preserves the source IP: set
+    #    controller.service.externalTrafficPolicy below to "Local".
+    # b) L7 load balancer / CDN that sets X-Forwarded-For and overwrites
+    #    client-supplied values:
+    # use-forwarded-headers: "true"
+    # proxy-real-ip-cidr: "10.0.0.0/8"  # the load balancer's address range
+    # c) PROXY protocol:
+    # use-proxy-protocol: "true"
+
+  service:
+    externalTrafficPolicy: Local

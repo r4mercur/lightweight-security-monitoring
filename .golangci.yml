@@ -1,0 +1,9 @@
+version: "2"
+
+linters:
+  # Default set: errcheck, govet, ineffassign, staticcheck, unused.
+  exclusions:
+    presets:
+      # Don't require checking errors of Close/Flush on readers and similar
+      # (golangci-lint v1 excluded these by default).
+      - std-error-handling

@@ -1,0 +1,114 @@
+# When API_KEYS is set, add "Authorization: Bearer {{apiKey}}" to /events and /alerts requests.
+@apiKey = change-me
+
+### 1. Ingest a failed login event
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "timestamp": "2026-04-24T10:00:00Z",
+  "ip": "192.168.1.10",
+  "event_type": "failed_login",
+  "message": "Login attempt with wrong password"
+}
+
+###
+
+### 2. Trigger a brute-force alert (send 5x rapidly from same IP)
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "ip": "10.0.0.99",
+  "event_type": "failed_login"
+}
+
+###
+
+### 3. SQL injection attempt
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "ip": "203.0.113.42",
+  "event_type": "http_request",
+  "path": "/search?q=' OR 1=1 --",
+  "user_agent": "curl/7.88"
+}
+
+###
+
+### 4. Sensitive path access
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "ip": "198.51.100.5",
+  "event_type": "http_request",
+  "path": "/.env",
+  "message": "GET /.env HTTP/1.1"
+}
+
+###
+
+### 5. Newest events (default limit 100, max 1000), optionally filtered by IP
+GET http://localhost:8080/events?limit=20&ip=10.0.0.99
+
+###
+
+### 6. Newest alerts
+GET http://localhost:8080/alerts?limit=20
+
+###
+
+### 7. Health check
+GET http://localhost:8080/health
+
+###
+
+### 8. Prometheus metrics
+GET http://localhost:8080/metrics
+
+###
+
+### 9. Batch ingestion (JSON array; NDJSON works as well)
+POST http://localhost:8080/events/batch
+Content-Type: application/json
+Authorization: Bearer {{apiKey}}
+
+[
+  {"ip": "198.51.100.7", "event_type": "http_request", "path": "/download?file=..%2f..%2fetc%2fpasswd", "user_agent": "sqlmap/1.7"},
+  {"ip": "198.51.100.7", "event_type": "port_scan", "port": 22},
+  {"ip": "not-an-ip"}
+]
+
+###
+
+### 10. Network event (e.g. from your own sensor); 10 distinct ports from one IP trigger PortScan
+POST http://localhost:8080/events
+Content-Type: application/json
+Authorization: Bearer {{apiKey}}
+
+{
+  "ip": "203.0.113.5",
+  "event_type": "firewall_block",
+  "dst_ip": "192.0.2.10",
+  "port": 22,
+  "src_port": 54321,
+  "protocol": "tcp",
+  "direction": "inbound"
+}
+
+###
+
+### 11. DNS query (e.g. from your own resolver); 50 distinct subdomains of one domain within a minute trigger DNSTunneling
+POST http://localhost:8080/events
+Content-Type: application/json
+Authorization: Bearer {{apiKey}}
+
+{
+  "ip": "192.168.1.23",
+  "event_type": "dns_query",
+  "domain": "c01.ZXhmaWx0cmF0ZWQ.x.evil-example.net",
+  "metadata": {"base_domain": "evil-example.net", "query_type": "TXT"}
+}
