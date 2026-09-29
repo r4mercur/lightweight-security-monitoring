@@ -1,4 +1,4 @@
-# SÄKERHET — assembly instructions
+# Assembly instructions
 
 **Security monitor for a Kubernetes namespace full of microservices.**
 One monitor, one log shipper, a few labels. About one hour, two terminals recommended.
