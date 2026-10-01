@@ -49,7 +49,8 @@ pkg/logger/
 
 deploy/kubernetes/           # Manifests & Helm values for the Kubernetes guide
 docs/
-└── kubernetes-setup.md      # Step-by-step setup in a Kubernetes cluster
+├── kubernetes-setup.md      # Step-by-step setup in a Kubernetes cluster
+└── rke2-istio-instead-of-ingress.md  # Same setup on RKE2 with the Istio ingress gateway
 ```
 
 ## Detection Rules
@@ -482,6 +483,8 @@ For the connection collector add `--network host` (the container would otherwise
 ## Kubernetes
 
 For a cluster with many microservices, follow the step-by-step guide **[docs/kubernetes-setup.md](docs/kubernetes-setup.md)**: the ingress controller writes its access log in the event format, Fluent Bit forwards it to `/events/batch`, services report failed logins via the API, and a NetworkPolicy restricts who may talk to the monitor. Manifests and Helm values are in [`deploy/kubernetes/`](deploy/kubernetes/).
+
+Using **Istio instead of an ingress controller** (on RKE2 or elsewhere)? **[docs/rke2-istio-instead-of-ingress.md](docs/rke2-istio-instead-of-ingress.md)** describes what changes: the ingress gateway's Envoy access log in the event format, the real client IP behind the gateway, keeping the monitor out of the mesh, RKE2 specifics (CoreDNS, CIS profile, Rancher Monitoring) and a go-live checklist. Not tested in a cluster yet.
 
 ## Tests
 

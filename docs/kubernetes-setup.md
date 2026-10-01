@@ -40,7 +40,7 @@ Steps 1–8, the test drive and the DNS kit were assembled and tested end to end
 ## 🔧 Tools you need
 
 - `kubectl`, `helm`, `docker` and a container registry the cluster can pull from
-- A cluster running **ingress-nginx** as the entry point for your microservices
+- A cluster running **ingress-nginx** as the entry point for your microservices (Istio instead? See [RKE2 with Istio instead of an Ingress controller](rke2-istio-instead-of-ingress.md))
 - A CNI that **enforces NetworkPolicies** (Calico, Cilium, most managed clusters; *not* kind's default)
 - Optional: the Prometheus Operator (e.g. kube-prometheus-stack), an Anthropic API key
 
