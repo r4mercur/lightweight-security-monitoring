@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"lightweight-security-monitoring/internal/api"
 	"lightweight-security-monitoring/internal/metrics"
@@ -241,9 +242,37 @@ func TestListEvents_LimitAndIPFilter(t *testing.T) {
 
 func TestListEvents_InvalidParameters(t *testing.T) {
 	srv := newServer(t)
-	for _, query := range []string{"limit=0", "limit=1001", "limit=abc", "ip=nope"} {
+	for _, query := range []string{"limit=0", "limit=1001", "limit=abc", "ip=nope", "severity=urgent"} {
 		if rec := do(t, srv, "GET", "/events?"+query, ""); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", query, rec.Code)
+		}
+	}
+}
+
+func TestList_TypeSeverityAndRuleFilters(t *testing.T) {
+	srv := newServer(t)
+	do(t, srv, "POST", "/events", `{"ip":"10.0.0.1","event_type":"http_request","path":"/.env"}`)         // SensitivePath, medium
+	do(t, srv, "POST", "/events", `{"ip":"10.0.0.2","event_type":"http_request","path":"/?q=1' OR 1=1"}`) // SQLInjection, high
+	do(t, srv, "POST", "/events", `{"ip":"10.0.0.3","event_type":"dns_query","domain":"example.com"}`)
+
+	total := func(path string) string {
+		var resp struct {
+			Total int `json:"total"`
+		}
+		rec := do(t, srv, "GET", path, "")
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return fmt.Sprintf("%d %d", rec.Code, resp.Total)
+	}
+	for path, want := range map[string]string{
+		"/events?type=dns_query":                   "200 1",
+		"/events?type=http_request":                "200 2",
+		"/alerts?severity=medium":                  "200 2",
+		"/alerts?severity=HIGH":                    "200 1",
+		"/alerts?rule=SensitivePath":               "200 1",
+		"/alerts?severity=high&rule=SensitivePath": "200 0",
+	} {
+		if got := total(path); got != want {
+			t.Errorf("%s: got %q, want %q", path, got, want)
 		}
 	}
 }

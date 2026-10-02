@@ -1,0 +1,74 @@
+{{define "content"}}
+<h1>Overview</h1>
+{{template "results" .}}
+{{end}}
+
+{{/* Refreshes itself; the response replaces the whole block. */}}
+{{define "results"}}
+<div id="results" hx-get="/ui/" hx-trigger="every {{.RefreshSeconds}}s" hx-target="this">
+  <section class="tiles">
+    <a class="tile" href="/ui/alerts">
+      <span class="label">Alerts, last {{.SummaryHours}} h</span>
+      <span class="value">{{.Summary.Total}}</span>
+      <span class="breakdown muted">from {{.Summary.IPs}} source IPs</span>
+      <span class="breakdown">
+        {{range severities}}{{$n := index $.Summary.BySeverity .}}<span class="sev sev-{{.}}{{if not $n}} zero{{end}}">{{$n}} {{.}}</span> {{end}}
+      </span>
+    </a>
+    <a class="tile" href="/ui/alerts?severity=critical">
+      <span class="label">Critical, last {{.SummaryHours}} h</span>
+      <span class="value{{if .Critical}} hot{{end}}">{{.Critical}}</span>
+    </a>
+    <a class="tile" href="/ui/events">
+      <span class="label">Stored events</span>
+      <span class="value">{{.Stats.Events}}</span>
+    </a>
+    <div class="tile">
+      <span class="label">Stored alerts</span>
+      <span class="value">{{.Stats.Alerts}}</span>
+    </div>
+  </section>
+
+  <section class="columns">
+    <div class="card">
+      <h2>Top source IPs <span class="muted small">by alerts, {{.SummaryHours}} h</span></h2>
+      {{with .Summary.TopIPs}}
+      <table class="compact">
+        {{range .}}<tr><td class="mono"><a href="{{ipURL .Key}}">{{.Key}}</a></td><td class="num">{{.Count}}</td></tr>{{end}}
+      </table>
+      {{else}}<p class="empty">No alerts.</p>{{end}}
+    </div>
+    <div class="card">
+      <h2>Top rules <span class="muted small">by alerts, {{.SummaryHours}} h</span></h2>
+      {{with .Summary.TopRules}}
+      <table class="compact">
+        {{range .}}<tr><td><a href="{{alertsURL "rule" .Key}}">{{.Key}}</a></td><td class="num">{{.Count}}</td></tr>{{end}}
+      </table>
+      {{else}}<p class="empty">No alerts.</p>{{end}}
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Latest alerts <a class="small" href="/ui/alerts">all alerts →</a></h2>
+    {{with .Latest}}
+    <div class="table-wrap">
+    <table data-resize="latest-alerts">
+      <thead><tr><th>Time</th><th>Severity</th><th>Rule</th><th>Source</th><th>Reason</th></tr></thead>
+      <tbody>
+      {{range .}}
+      <tr>
+        <td class="nowrap">{{template "time" .Timestamp}}</td>
+        <td>{{template "severity" .Severity}}</td>
+        <td class="nowrap">{{.TriggerRule}}</td>
+        <td class="mono nowrap"><a href="{{ipURL .IP}}">{{.IP}}</a></td>
+        <td class="clip" title="{{.Reason}}">{{.Reason}}</td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+    </div>
+    {{else}}<p class="empty">No alerts yet.</p>{{end}}
+  </section>
+  <p class="muted small">Updates every {{.RefreshSeconds}} seconds.</p>
+</div>
+{{end}}

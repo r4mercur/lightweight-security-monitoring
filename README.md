@@ -35,9 +35,15 @@ internal/
 │   └── rules/default.json   # Default rule set (embedded)
 ├── repository/
 │   ├── memory.go            # Thread-safe in-memory store with retention & capacity limits
-│   └── indexed_log.go       # Per-IP, time-sorted index shared by events and alerts
+│   ├── indexed_log.go       # Per-IP, time-sorted index shared by events and alerts
+│   └── sqlite.go            # Persistent SQLite store (pure Go, batched writes, schema migrations)
 ├── metrics/
 │   └── metrics.go           # Prometheus counters, gauges & histogram
+├── web/
+│   ├── web.go               # Read-only web UI: handlers, view models, template helpers
+│   ├── auth.go              # HTTP Basic Auth & security headers (CSP)
+│   ├── templates/           # html/template pages (overview, alerts, events, IP, rules)
+│   └── static/              # app.css, table.js (resizable columns), logo.svg (favicon & header logo), vendored htmx.min.js (embedded)
 └── ai/
     ├── analyzer.go          # Analyzer interface, configuration, shared prompt & result schema
     ├── anthropic.go         # Claude via the official Anthropic Go SDK
@@ -147,7 +153,7 @@ How the engine decides:
 
 Rule files are validated at startup and the server refuses to start on errors. Parsing is strict (`encoding/json/v2`), so a mistake cannot silently disable part of a rule: unknown or mis-cased keys, **duplicate keys** (e.g. `"regex"` twice after copy-paste, where the first list would otherwise be dropped) and trailing content are rejected, as are invalid regexes, unknown event fields and duplicate rule names.
 
-Logic that does not fit the built-in kinds can be written in Go and exposed to rule files with `service.RegisterRuleKind("my_kind", factory)`; embed `service.RuleBase` to get name, severity, cooldown and reason handling for free. A custom kind that keeps per-IP state should implement `service.Pruner` so idle state is released; one that reads past events via `FindEventsByIPSince` needs `EVENT_RETENTION` to cover its window.
+Logic that does not fit the built-in kinds can be written in Go and exposed to rule files with `service.RegisterRuleKind("my_kind", factory)`; embed `service.RuleBase` to get name, severity, cooldown and reason handling for free. A custom kind that keeps per-IP state should implement `service.Pruner` so idle state is released; one that reads past events via `FindEventsByIPSince` needs `EVENT_RETENTION` to cover its window. With the [SQLite store](#sqlite) every such call first writes the buffered events, so a kind that calls it for every event pays one commit per event (~110 µs); keep a window in memory instead, like the built-in kinds.
 
 ## API Endpoints
 
@@ -155,8 +161,9 @@ Logic that does not fit the built-in kinds can be written in Go and exposed to r
 |--------|------|------|-------------|
 | `POST` | `/events` | ✔ | Ingest a security event (max 64 KiB) |
 | `POST` | `/events/batch` | ✔ | Ingest up to 10,000 events (JSON array or NDJSON, max 5 MiB) — sized for log shippers' buffer chunks |
-| `GET` | `/events?ip=&limit=` | ✔ | Newest stored events (default 100, max 1000), optionally for one IP |
-| `GET` | `/alerts?ip=&limit=` | ✔ | Newest alerts (default 100, max 1000), optionally for one IP |
+| `GET` | `/events?ip=&type=&limit=` | ✔ | Newest stored events (default 100, max 1000), optionally for one IP and/or event type |
+| `GET` | `/alerts?ip=&severity=&rule=&limit=` | ✔ | Newest alerts (default 100, max 1000), optionally for one IP, a minimum severity and/or a trigger rule |
+| `GET` | `/ui/` | Basic | [Web UI](#web-ui) (only with `UI_PASSWORD`); `/` redirects there |
 | `GET` | `/health` | — | Liveness probe |
 | `GET` | `/metrics` | — | Prometheus metrics |
 
@@ -215,7 +222,7 @@ HTTP 200 OK
 {"count": 50, "total": 1234, "events": [ ...newest first... ]}
 ```
 
-`count` is the number of returned items, `total` the number of stored items matching the query. Without `ip`, items are ordered by arrival; with `ip`, by event timestamp.
+`count` is the number of returned items, `total` the number of stored items matching the query. Without `ip`, items are ordered by arrival; with `ip`, by event timestamp. Filters combine: `GET /alerts?severity=high&rule=BruteForce` returns brute-force alerts of severity `high` or above; `severity` is a minimum (`low`, `medium`, `high`, `critical`), `type` and `rule` match exactly.
 
 ### Alert response (when a rule fires)
 
@@ -382,6 +389,8 @@ Instead of the built-in collectors, any log shipper can send to `POST /events/ba
 |----------|---------|-------------|
 | `ADDR` | `:8080` | Listen address |
 | `API_KEYS` | — | Comma-separated API keys; unset = no authentication |
+| `UI_PASSWORD` | — | Password of the [web UI](#web-ui); unset = UI off. A warning is logged below 16 characters |
+| `UI_USER` | `admin` | User name of the web UI |
 | `RULES_FILE` | embedded defaults | Detection rule file |
 | `COLLECTORS_FILE` | — | Collector configuration; unset = no collectors |
 | `AI_PROVIDER` | by API key, else `none` | `anthropic`, `openai`, `ollama` or `none` — see [AI analysis](#ai-analysis) |
@@ -392,10 +401,11 @@ Instead of the built-in collectors, any log shipper can send to `POST /events/ba
 | `AI_TIMEOUT` | `30s` | Timeout per analysis request |
 | `AI_WORKERS` / `AI_QUEUE_SIZE` | `2` / `100` | Parallel analyses / alerts waiting; alerts beyond the queue are `skipped` |
 | `AI_MIN_SEVERITY` | `low` | Only analyze alerts of at least this severity (cost control) |
-| `TZ` | system / UTC in Docker | Time zone for log timestamps without offset (syslog RFC 3164, `pfirewall.log`) |
+| `TZ` | system / UTC in Docker | Time zone for log timestamps without offset (syslog RFC 3164, `pfirewall.log`) and for times shown in the web UI |
+| `DB_PATH` | — | SQLite database file, e.g. `/data/monitoring.db`; created if missing. Unset = events and alerts are kept in memory only — see [Storage](#storage) |
 | `EVENT_RETENTION` | `24h` | How long events are kept (by event timestamp); `0` = forever |
 | `ALERT_RETENTION` | `168h` | How long alerts are kept; must cover the longest cooldown / correlation window (startup check); `0` = forever |
-| `MAX_EVENTS` | `200000` | Maximum stored events; the oldest received are evicted first; `0` = unlimited |
+| `MAX_EVENTS` | `200000` | Maximum stored events; the oldest received are evicted first (in memory immediately, with SQLite every minute); `0` = unlimited |
 | `MAX_ALERTS` | `50000` | Maximum stored alerts; `0` = unlimited |
 
 ## AI analysis
@@ -435,16 +445,91 @@ The answer is constrained by a JSON schema (structured outputs on all three prov
 
 **Cost.** Only alerts are analyzed, not events, and cooldowns limit repeated alerts; `AI_MIN_SEVERITY=high` restricts analysis further. Token usage per provider is visible in the provider's console.
 
+## Web UI
+
+A read-only browser UI for whoever looks at the alerts. Set `UI_PASSWORD` to switch it on and open `http://localhost:8080/ui/` (user `admin`, or `UI_USER`):
+
+```bash
+DB_PATH=./monitoring.db UI_PASSWORD="$(openssl rand -base64 24)" go run ./cmd/main.go
+```
+
+| Page | Shows |
+|------|-------|
+| **Overview** `/ui/` | Alerts of the last 24 h by severity and from how many IPs, stored events and alerts, top 10 source IPs and rules, latest alerts. Refreshes every 15 s |
+| **Alerts** `/ui/alerts` | Filter by source IP, minimum severity, rule; click an alert for reason, related rules and AI analysis. Every 5 s it checks for newer matching alerts and offers to show them, without reloading the list under your cursor |
+| **Events** `/ui/events` | Filter by source IP and event type; paths, DNS names, user agents and metadata as stored |
+| **IP** `/ui/ips/{ip}` | Everything about one address: its alerts next to the events that caused them. Every source IP in the UI links here |
+| **Rules** `/ui/rules` | The loaded rules with kind, severity, condition and cooldown, disabled ones greyed out; each links to its alerts |
+
+**Column widths.** Every table can be adjusted: drag the right edge of a column header, or focus that edge with Tab and use the arrow keys. A double-click on an edge restores the automatic widths. The widths are remembered per table in the browser (`localStorage`), so they survive reloads, filter changes and the overview's refresh; they are a per-browser preference, nothing is sent to the server. This is the only script besides htmx (`static/table.js`, ~150 lines).
+
+**Logo.** A detective with a magnifying glass on a dark tile (`static/logo.svg`) serves as favicon and as logo next to the title. It is a single SVG, sharp at every size; the light edge of the tile keeps it visible on dark backgrounds. Browsers without SVG favicons (older Safari) fall back to their default icon.
+
+**How it is built.** Server-rendered `html/template` pages, made interactive with [htmx](https://htmx.org) 2.0.11: filters replace only the result list and update the URL (bookmarkable, back button works), the overview and the new-alert check poll the server. There is no JavaScript build step and no external resource — templates, CSS and scripts are embedded in the binary (`internal/web`), so the UI works in the `scratch` image and in air-gapped clusters. Without JavaScript the filter forms still work as plain forms. The UI reads the store directly; the browser never sees an API key.
+
+**Security.** The UI shows data an attacker wrote — an XSS payload in a path is exactly what it is supposed to display. Therefore:
+
+- **Escaping:** every value goes through `html/template`'s context-aware escaping; attacker data is never placed into `hx-*` attributes, which htmx would interpret. Tests feed `<script>`, `onerror=` and `hx-get=` payloads through the pipeline and check every page that shows event or alert data.
+- **Content Security Policy:** `script-src 'self'; style-src 'self'`, no inline code, no `eval`, `frame-ancestors 'none'`. htmx runs with `allowEval: false`, `allowScriptTags: false`, `selfRequestsOnly: true` and without history cache, so no page content is copied into `localStorage` (only column widths are stored there). Even a value that escaped the encoding could not run.
+- **Read-only:** the UI only answers `GET` requests and changes nothing, so cross-site requests (CSRF) cannot do harm, although browsers send Basic Auth credentials along automatically.
+- **Basic Auth:** user and password are compared as SHA-256 hashes in constant time; failed logins are logged (`web UI login failed`) with the client address. Basic Auth sends the password with **every** request, so use the UI over TLS or a tunnel (`kubectl port-forward`, SSH), never over plain HTTP across a network. There is no lockout after failed attempts: use a long random password (`openssl rand -base64 24`). To log out, close the browser.
+- **Other headers:** `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` on pages. CSS and scripts are cached for 30 days under URLs with a content hash, so an update is picked up immediately.
+
 ## Storage
 
-Events and alerts are kept in memory, indexed by source IP and sorted by time, so per-IP lookups do not scan the whole store. Memory is bounded twice:
+Events and alerts are stored in one of two backends behind the same repository interfaces:
+
+| | In memory (default) | SQLite (`DB_PATH` set) |
+|-|---------------------|------------------------|
+| Survives a restart | no | yes |
+| Size of a typical access-log event | ~0.9 KiB RAM | ~0.6 KiB on disk |
+| Default `MAX_EVENTS=200000` needs | ~175 MB RAM | ~110 MB disk |
+| Capacity limit enforced | on every insert | every minute by the janitor |
+| Use for | trying it out, tests, short-lived setups | everything else |
+
+Both are bounded the same way:
 
 - **Retention** – a janitor removes expired events and alerts (and idle rule windows) every minute.
-- **Capacity** – when `MAX_EVENTS` / `MAX_ALERTS` is reached, the oldest received item is evicted immediately.
+- **Capacity** – beyond `MAX_EVENTS` / `MAX_ALERTS` the oldest received items are evicted.
 
-A typical access-log event takes about **0.9 KiB**, so the default `MAX_EVENTS=200000` needs roughly 175 MB. Detection does not depend on the event store (threshold rules use their own windows), so a small capacity only shortens what `GET /events` can show. Watch `storage_evictions_total{reason="capacity"}`: if it grows steadily, events are evicted before their retention ends.
+Detection does not depend on the event store (threshold and beacon rules keep their own windows in memory), so a small capacity only shortens what `GET /events` can show. Watch `storage_evictions_total{reason="capacity"}`: if it grows steadily, events are evicted before their retention ends.
 
-Everything is lost on restart. The repositories are interfaces, so a persistent backend can be added without touching the detection logic.
+### SQLite
+
+```bash
+DB_PATH=./monitoring.db go run ./cmd/main.go
+```
+
+The database file is created on first start and its schema is migrated automatically (`PRAGMA user_version`; a binary refuses a database created by a newer version). The driver is [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite), a pure Go port: no CGO, so the binary stays static and the `scratch` image works unchanged.
+
+- **What survives a restart:** events and alerts, and with them the alert history that cooldowns and `MultiVector` correlation read. A rule does not alert again for an IP just because the monitor restarted. Rule windows (e.g. a port scan half counted) start empty; the AI analysis of alerts still `pending` at shutdown is not resumed.
+- **Batched writes.** A commit per event would cost ~110 µs; events are therefore buffered and written in one transaction when 1000 have collected, after at most 100 ms, and before events are read (`GET /events`), so a reader always sees every saved event. Each event then costs ~12 µs to store, on top of ~19 µs for detection (`go test ./internal/repository -bench SQLite`). Alerts are written immediately, because cooldowns read them with the next event.
+- **Durability.** WAL mode with `synchronous=NORMAL`: on `SIGTERM` everything is written. A crash or power loss can lose the events of the last ~100 ms (and the last committed transactions), but never corrupts the database. Log shippers retry, see below.
+- **Disk space.** Rows removed by retention leave free pages that new rows reuse; the file grows to its high-water mark and stays there. Next to the database SQLite keeps `monitoring.db-wal` and `monitoring.db-shm`; they belong to the database (back up all three or use the tools below).
+- **Rows** hold the indexed columns (IP, timestamp, event type, severity, rule) plus the full item as JSON, so new event fields need no schema change. The file can be inspected with any SQLite client, e.g. `sqlite3 monitoring.db "SELECT ip, count(*) FROM alerts GROUP BY ip ORDER BY 2 DESC LIMIT 10"` — read-only while the monitor runs.
+
+### Why SQLite and a single instance
+
+The decision, and what it rules out:
+
+- **Not a time-series database.** Events are documents, not numeric series: free text (path, user agent, message, metadata) and fields with unbounded distinct values (IP, domain). InfluxDB, Prometheus or VictoriaMetrics index labels, and the IP as a label is exactly the high cardinality they handle badly. The time series this service produces — counters, rates, latencies — already go to Prometheus via `/metrics`. Split: **SQLite for events and alerts, Prometheus for metrics.**
+- **One instance is a property of the detection, not of SQLite.** Threshold, beacon and cooldown state lives in the memory of the process. With three replicas behind a Service, the events of one attacker are spread across three pods: a port scan over 12 ports becomes 4 + 4 + 4, and none of them reaches the threshold of 10. A shared database (e.g. Postgres) would not change that, because the rule windows are not read from the store. Load balancing by client IP does not help either: log shippers send batches with events of many IPs.
+- **One instance is enough.** A single process stores and evaluates tens of thousands of events per second. Scale vertically (CPU, memory) before anything else.
+- **Distribute the collection, not the detection.** Run the log shippers (Fluent Bit DaemonSet) and collectors on every node; they hold no detection state and send to the one monitor via `POST /events/batch`. When the monitor restarts, they retry.
+- **When to change it.** Real horizontal scaling would need events partitioned by IP — a queue such as NATS JetStream or Kafka keyed by `hash(ip)`, one detection consumer per partition — and a shared store such as Postgres. That is a different architecture; the repository interfaces keep the step open.
+
+### Running SQLite in Kubernetes
+
+SQLite fits Kubernetes well as long as exactly one pod writes to the file and the file lives on block storage:
+
+- **Block storage, `ReadWriteOnce`.** Longhorn, Ceph RBD, cloud disks (EBS, Azure Disk, PD) or local-path. **Never NFS, CephFS, Azure Files or EFS** (`ReadWriteMany`): SQLite's file locking does not work on network file systems, and WAL mode needs shared memory on one host — the database can be corrupted. Several pods sharing one file is impossible for the same reason.
+- **No overlap during updates.** `ReadWriteOnce` is per *node*: during a rolling update the old and the new pod may both mount the volume when they run on the same node. The [Deployment](deploy/kubernetes/deployment.yaml) uses `strategy: Recreate`; with a CSI driver, `ReadWriteOncePod` enforces this in Kubernetes itself.
+- **Node failures.** Longhorn and cloud disks reattach the volume on another node (after an unclean node failure this can take a few minutes). With local-path the data is bound to its node, and the pod cannot move.
+- **Writable volume.** The image runs as UID 65534; the pod's `fsGroup: 65534` makes the volume writable.
+- **Backups.** Continuously with [Litestream](https://litestream.io) as a sidecar, which replicates the WAL to S3 or MinIO and can restore the database on a new node; or periodically with `VolumeSnapshot`s.
+- **No lost events during restarts.** Fluent Bit retries unsent chunks in memory, up to `Retry_Limit` times (5 in [`fluent-bit-values.yaml`](deploy/kubernetes/fluent-bit-values.yaml)) with growing backoff, which covers a normal restart. For longer outages, buffer to disk (`storage.type filesystem` on the inputs, `storage.path` in `[SERVICE]`) and raise `Retry_Limit` (or set `no_limits`).
+
+The [Kubernetes guide](docs/kubernetes-setup.md) sets this up: a 2 GiB PVC, `DB_PATH=/data/monitoring.db`, `MAX_EVENTS=1000000`.
 
 ## Running locally
 
@@ -454,10 +539,10 @@ Requires **Go 1.27** or newer (`go.mod`: `go 1.27.0`; the Dockerfile and CI use 
 go run ./cmd/main.go
 ```
 
-With authentication, AI analysis and an access log collector:
+With persistence, authentication, AI analysis and an access log collector:
 
 ```bash
-API_KEYS=change-me AI_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... COLLECTORS_FILE=./collectors.json go run ./cmd/main.go
+DB_PATH=./monitoring.db API_KEYS=change-me AI_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... COLLECTORS_FILE=./collectors.json go run ./cmd/main.go
 ```
 
 ## Docker
@@ -466,15 +551,20 @@ API_KEYS=change-me AI_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... COLLECTORS
 # Build
 docker build -t security-monitor .
 
-# Run with collectors reading the host's Nginx and UFW logs
+# Run with a persistent database, the web UI and collectors reading the host's Nginx and UFW logs
 docker run -p 8080:8080 \
   -e API_KEYS=change-me \
+  -e UI_PASSWORD="$(openssl rand -base64 24)" \
   -e TZ=Europe/Berlin \
+  -e DB_PATH=/data/monitoring.db \
+  -v security-monitor-data:/data \
   -e COLLECTORS_FILE=/config/collectors.json \
   -v "$PWD/collectors.json:/config/collectors.json:ro" \
   -v /var/log:/var/log:ro \
   security-monitor
 ```
+
+The image contains an empty `/data` owned by UID 65534; a new named volume takes over that owner. With a bind mount (`-v /srv/secmon:/data`) the host directory must be writable by UID 65534 (`chown 65534:65534 /srv/secmon`).
 
 Mount log **directories**, not single files: after rotation the new file is only visible through the directory. The container runs as UID 65534; the log files must be readable by it (Nginx and UFW logs are often `root:adm 640`, e.g. add `--group-add 4` for `adm`).
 
@@ -482,7 +572,7 @@ For the connection collector add `--network host` (the container would otherwise
 
 ## Kubernetes
 
-For a cluster with many microservices, follow the step-by-step guide **[docs/kubernetes-setup.md](docs/kubernetes-setup.md)**: the ingress controller writes its access log in the event format, Fluent Bit forwards it to `/events/batch`, services report failed logins via the API, and a NetworkPolicy restricts who may talk to the monitor. Manifests and Helm values are in [`deploy/kubernetes/`](deploy/kubernetes/).
+For a cluster with many microservices, follow the step-by-step guide **[docs/kubernetes-setup.md](docs/kubernetes-setup.md)**: the ingress controller writes its access log in the event format, Fluent Bit forwards it to `/events/batch`, services report failed logins via the API, and a NetworkPolicy restricts who may talk to the monitor. The web UI is reached through `kubectl port-forward`. Manifests and Helm values are in [`deploy/kubernetes/`](deploy/kubernetes/).
 
 Using **Istio instead of an ingress controller** (on RKE2 or elsewhere)? **[docs/rke2-istio-instead-of-ingress.md](docs/rke2-istio-instead-of-ingress.md)** describes what changes: the ingress gateway's Envoy access log in the event format, the real client IP behind the gateway, keeping the monitor out of the mesh, RKE2 specifics (CoreDNS, CIS profile, Rancher Monitoring) and a go-live checklist. Not tested in a cluster yet.
 
@@ -497,11 +587,18 @@ golangci-lint run ./...
 # Throughput while one IP floods the service (constant cost per event, independent of store size)
 go test ./internal/service -run '^$' -bench Flood -benchmem
 
+# Cost per event of the SQLite store, including the batched writes
+go test ./internal/repository -run '^$' -bench SQLite
+
 # Suggested modernizations for the current Go version (none are pending)
 go fix -diff ./...
 ```
 
 Time-dependent tests (the log tailer, collectors end to end, the AI analysis queue) run in [`testing/synctest`](https://pkg.go.dev/testing/synctest) bubbles: they use a fake clock instead of sleeping, so they are fast and deterministic, and a test fails if a goroutine does not stop on shutdown.
+
+The SQLite tests use real database files in a temporary directory (one test waits for the 100 ms background write). Besides the individual cases, a test runs thousands of random inserts, prunes and queries against the in-memory and the SQLite store and requires identical results, so both backends keep the same semantics.
+
+The web UI tests run every page against a store filled through the real ingestion pipeline and fail on any template error. They check Basic Auth, the security headers, htmx partial responses, the new-alert check and that attacker payloads (`<script>`, `onerror=`, `hx-get=`) only ever appear escaped.
 
 ## Metrics (Prometheus)
 
@@ -512,7 +609,7 @@ Time-dependent tests (the log tailer, collectors end to end, the AI analysis que
 | `event_processing_duration_seconds` | Histogram | — |
 | `collector_lines_total` | Counter | `collector`, `result` (`ingested`, `skipped`, `parse_error`, `ingest_error`) — log lines, or new sockets for the connection collector |
 | `storage_events` / `storage_alerts` | Gauge | — |
-| `storage_event_ips` | Gauge | — (distinct source IPs among stored events) |
+| `storage_event_ips` | Gauge | — (distinct source IPs among stored events; with SQLite counted every minute) |
 | `storage_evictions_total` | Counter | `kind` (`event`, `alert`), `reason` (`retention`, `capacity`) |
 | `ai_analyses_total` | Counter | `provider`, `result` (`completed`, `failed`, `refused`, `skipped`) |
 | `ai_analysis_duration_seconds` | Histogram | `provider` |
@@ -526,8 +623,10 @@ Scrape at `http://localhost:8080/metrics`.
 - **Interface-based DI** — `EventRepository`, `AlertRepository`, `Analyzer`, `MetricsRecorder` are all interfaces, enabling easy testing and swapping implementations
 - **Rules as data** — Detection rules live in JSON and are built from a few generic kinds; adding a pattern requires no code change. New kinds plug in via `RegisterRuleKind`
 - **One pipeline for every source** — API, batch, and the access-log, firewall, DNS and connection collectors all produce the same `Event`, validated and normalized by `Event.Normalize`, so every rule works on every source
-- **Bounded memory, constant cost** — Retention and capacity limits cap memory; per-IP indexes and sliding windows keep the cost per event independent of the amount of stored data
-- **Graceful shutdown** — `SIGINT`/`SIGTERM` caught, active requests drained within 15 s, collectors and janitor stopped
-- **Minimal image** — Multi-stage Docker build produces a `scratch`-based image (~25 MB) that runs as an unprivileged user and passes the `restricted` Pod Security Standard
+- **Bounded storage, constant cost** — Retention and capacity limits cap memory and disk; per-IP indexes and sliding windows keep the cost per event independent of the amount of stored data
+- **SQLite, one instance** — Events and alerts persist in a single SQLite file (pure Go, no CGO, no database server). Detection state is per process, so the monitor runs as exactly one instance and collection is what gets distributed — see [Why SQLite and a single instance](#why-sqlite-and-a-single-instance)
+- **Graceful shutdown** — `SIGINT`/`SIGTERM` caught, active requests drained within 15 s, collectors and janitor stopped, buffered events written
+- **Minimal image** — Multi-stage Docker build produces a `scratch`-based image (~30 MB) that runs as an unprivileged user and passes the `restricted` Pod Security Standard
 - **AI as an opt-in, never in the critical path** — Providers are interchangeable behind one `Analyzer` interface (Anthropic, OpenAI, local Ollama); without configuration AI is simply off, and when on it runs in a background queue that can neither delay detection nor lower a severity
+- **Server-rendered UI without a build step** — `html/template` + htmx, embedded in the binary, read-only, behind Basic Auth and a strict Content Security Policy; it shows attacker-written data, so escaping and CSP are treated as security boundaries, not cosmetics
 

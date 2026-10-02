@@ -1,0 +1,83 @@
+{{/* Shared building blocks. Every value from an event or alert is attacker
+     controlled: it is only ever output through html/template's escaping and
+     never placed into hx-* attributes, which htmx would interpret. */}}
+
+{{define "severity"}}<span class="sev sev-{{.}}">{{.}}</span>{{end}}
+
+{{define "time"}}<time datetime="{{.Format "2006-01-02T15:04:05Z07:00"}}" title="{{time .}}">{{ago .}}</time>{{end}}
+
+{{define "alert-list"}}
+{{if .}}
+<div class="alerts">
+  {{range .}}
+  <details class="alert">
+    <summary>
+      <span class="when">{{template "time" .Timestamp}}</span>
+      {{template "severity" .Severity}}
+      <span class="rule">{{.TriggerRule}}</span>
+      <a class="ip mono" href="{{ipURL .IP}}">{{.IP}}</a>
+      <span class="reason">{{.Reason}}</span>
+      {{with .AIAnalysis}}<span class="ai-badge ai-{{.Status}}{{with .Verdict}} verdict-{{.}}{{end}}" title="AI analysis">AI: {{if .Verdict}}{{.Verdict}}{{else}}{{.Status}}{{end}}</span>{{end}}
+    </summary>
+    <dl class="facts">
+      <dt>Time</dt><dd>{{time .Timestamp}}</dd>
+      <dt>Reason</dt><dd>{{.Reason}}</dd>
+      <dt>Category</dt><dd>{{.EventType}}</dd>
+      <dt>Events counted</dt><dd>{{.EventCount}}</dd>
+      {{with .RelatedRules}}<dt>Also fired</dt><dd>{{join . ", "}}</dd>{{end}}
+      <dt>Alert ID</dt><dd class="mono">{{.ID}}</dd>
+    </dl>
+    {{with .AIAnalysis}}{{template "ai" .}}{{end}}
+  </details>
+  {{end}}
+</div>
+{{else}}
+<p class="empty">No alerts.</p>
+{{end}}
+{{end}}
+
+{{define "ai"}}
+<section class="ai">
+  <h4>AI analysis <span class="ai-badge ai-{{.Status}}">{{.Status}}</span></h4>
+  {{if eq .Status "pending"}}<p class="muted">Waiting for the model; reload the page to see the result.</p>{{end}}
+  <dl class="facts">
+    {{with .Verdict}}<dt>Verdict</dt><dd><span class="verdict verdict-{{.}}">{{.}}</span>{{with $.Confidence}} · {{.}} confidence{{end}}</dd>{{end}}
+    {{with .Category}}<dt>Category</dt><dd>{{.}}</dd>{{end}}
+    {{with .Summary}}<dt>Summary</dt><dd>{{.}}</dd>{{end}}
+    {{with .RecommendedAction}}<dt>Next step</dt><dd>{{.}}</dd>{{end}}
+    {{with .Error}}<dt>Error</dt><dd>{{.}}</dd>{{end}}
+    {{if .Model}}<dt>Model</dt><dd>{{.Provider}} / {{.Model}}{{with .AnalyzedAt}} · {{time .}}{{end}}</dd>{{end}}
+  </dl>
+  <p class="muted small">The AI only adds context. It never changes an alert's severity: the analyzed data may be written to mislead it.</p>
+</section>
+{{end}}
+
+{{define "event-table"}}
+{{if .}}
+<div class="table-wrap">
+<table class="events" data-resize="events">
+  <thead><tr><th>Time</th><th>Type</th><th>Source</th><th>Destination</th><th>Detail</th><th>Status</th><th>User agent</th><th>Metadata</th></tr></thead>
+  <tbody>
+  {{range .}}
+  <tr>
+    <td class="nowrap">{{template "time" .Timestamp}}</td>
+    <td class="nowrap">{{.EventType}}{{with .Direction}} <span class="muted">({{.}})</span>{{end}}</td>
+    <td class="mono nowrap"><a href="{{ipURL .IP}}">{{.IP}}</a></td>
+    <td class="mono nowrap">{{destination .}}{{with .Protocol}} <span class="muted">{{.}}</span>{{end}}</td>
+    {{- $detail := eventDetail .}}
+    <td class="mono clip" title="{{$detail}}">{{$detail}}</td>
+    <td>{{with .StatusCode}}{{.}}{{end}}</td>
+    <td class="clip" title="{{.UserAgent}}">{{.UserAgent}}</td>
+    {{- $meta := metadata .Metadata}}
+    <td class="mono clip muted" title="{{$meta}}">{{$meta}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{else}}
+<p class="empty">No events.</p>
+{{end}}
+{{end}}
+
+{{define "errors"}}{{with .}}<div class="notice error" role="alert">{{range .}}<p>{{.}}</p>{{end}}</div>{{end}}{{end}}

@@ -189,7 +189,7 @@ func TestIndexedLog_MatchesModel(t *testing.T) {
 			for i := len(model) - 1; i >= 0 && len(newest) < 10; i-- {
 				newest = append(newest, model[i].id)
 			}
-			if got, total := l.newest("", 10); !slices.Equal(got, newest) || total != len(model) {
+			if got, total := l.newest("", 10, nil); !slices.Equal(got, newest) || total != len(model) {
 				t.Fatalf("step %d: newest = %v (%d), want %v (%d)", step, got, total, newest, len(model))
 			}
 		}

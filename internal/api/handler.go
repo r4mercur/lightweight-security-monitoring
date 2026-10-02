@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -216,7 +217,7 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /events?ip=&limit= – newest stored events
+// GET /events?ip=&type=&limit= – newest stored events
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
@@ -243,7 +244,7 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /alerts?ip=&limit= – newest generated alerts
+// GET /alerts?ip=&severity=&rule=&limit= – newest generated alerts
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Handler) ListAlerts(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +281,14 @@ func parseListQuery(r *http.Request) (repository.ListQuery, error) {
 		}
 		q.Limit = n
 	}
+	q.EventType = domain.EventType(r.URL.Query().Get("type"))
+	if s := r.URL.Query().Get("severity"); s != "" {
+		q.MinSeverity = domain.Severity(strings.ToLower(s))
+		if !q.MinSeverity.Valid() {
+			return q, fmt.Errorf("parameter 'severity' must be low, medium, high or critical, got %q", s)
+		}
+	}
+	q.Rule = r.URL.Query().Get("rule")
 	return q, nil
 }
 

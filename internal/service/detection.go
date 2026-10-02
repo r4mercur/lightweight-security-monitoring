@@ -38,6 +38,9 @@ type Pruner interface {
 type RuleSet struct {
 	Rules       []Rule
 	Correlators []Correlator
+	// Specs are the definitions from the rule file in file order, disabled
+	// ones included, e.g. to display them.
+	Specs []RuleSpec
 }
 
 // Len returns the total number of rules and correlators.

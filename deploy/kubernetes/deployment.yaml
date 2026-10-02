@@ -4,6 +4,22 @@ metadata:
   name: security-monitor
 automountServiceAccountToken: false # the monitor never talks to the Kubernetes API
 ---
+# Events and alerts are stored in SQLite on this volume. It must be block
+# storage (Longhorn, Ceph RBD, cloud disks, local-path), never NFS/CephFS/
+# Azure Files: SQLite's file locking does not work on network file systems.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: security-monitor-data
+  labels:
+    app.kubernetes.io/name: security-monitor
+spec:
+  accessModes: ["ReadWriteOnce"] # ReadWriteOncePod if your CSI driver supports it
+  # storageClassName: longhorn    # omit to use the cluster's default class
+  resources:
+    requests:
+      storage: 2Gi # ~0.6 KiB per event: MAX_EVENTS=1000000 needs ~600 MiB, plus alerts and headroom
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,8 +27,9 @@ metadata:
   labels:
     app.kubernetes.io/name: security-monitor
 spec:
-  # Events, alerts and rule windows live in memory: run exactly one instance.
-  # Recreate avoids two pods with diverging state during an update.
+  # Rule windows live in memory and the SQLite file allows one writer: run
+  # exactly one instance. Recreate stops the old pod before the new one opens
+  # the database (ReadWriteOnce alone allows two pods on the same node).
   replicas: 1
   strategy:
     type: Recreate
@@ -30,6 +47,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
+        fsGroup: 65534 # makes the data volume writable
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -52,10 +70,19 @@ spec:
                   name: security-monitor
                   key: anthropic-api-key
                   optional: true
+            # Web UI at /ui/ (user "admin"); without this key in the secret the UI is off.
+            - name: UI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: security-monitor
+                  key: ui-password
+                  optional: true
             - name: AI_MIN_SEVERITY # only analyze high and critical alerts (cost)
               value: high
-            - name: MAX_EVENTS # ~0.9 KiB per event, see README "Storage"
-              value: "200000"
+            - name: DB_PATH # persist events and alerts, see README "Storage"
+              value: /data/monitoring.db
+            - name: MAX_EVENTS # on disk, ~0.6 KiB per event; size the volume for it
+              value: "1000000"
             - name: GOMEMLIMIT # let the Go GC keep the heap below the container limit
               value: 400MiB
           resources:
@@ -80,6 +107,13 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: security-monitor-data
 ---
 apiVersion: v1
 kind: Service

@@ -31,7 +31,7 @@ The monitor itself does not depend on the ingress. It accepts events from anyone
 
 | Part | ingress-nginx setup | RKE2 + Istio |
 |------|---------------------|--------------|
-| Monitor (Deployment, Service, API, rules) | [`deployment.yaml`](../deploy/kubernetes/deployment.yaml) | unchanged |
+| Monitor (Deployment, data volume, Service, API, rules) | [`deployment.yaml`](../deploy/kubernetes/deployment.yaml) | unchanged; RKE2 needs a StorageClass for the volume ([assumptions](#-assumptions)) |
 | Namespace `security` | PSS `restricted` | unchanged, plus **out of the mesh** (step 2) |
 | Access log in the event format | `log-format-upstream` in ingress-nginx | Envoy access log provider + `Telemetry` (step 5) |
 | Real client IP | `externalTrafficPolicy`, `use-forwarded-headers`, PROXY protocol | `externalTrafficPolicy`, `gatewayTopology` (step 5c) |
@@ -43,6 +43,7 @@ The monitor itself does not depend on the ingress. It accepts events from anyone
 ## 🔧 Assumptions
 
 - RKE2 with its default CNI **Canal** (or Calico/Cilium). All three enforce NetworkPolicies.
+- A default StorageClass for the monitor's data volume. RKE2 ships none: install **Longhorn** (replicates volumes across nodes, so the monitor can move when a node fails) or the local-path provisioner (data stays on one node). Not NFS: SQLite's locking does not work on network file systems.
 - Istio is installed with Helm (`base`, `istiod`, `gateway`) and serves your applications. The ingress gateway runs as `istio-ingressgateway` in `istio-system`, with the label `istio: ingressgateway`. Different names are fine; adjust the paths and selectors below.
 - Application namespaces (here: `shop`) have sidecar injection enabled. The guide also works with ambient mode; the differences are noted where they matter.
 - RKE2's bundled ingress-nginx is disabled because Istio replaces it. In `/etc/rancher/rke2/config.yaml` on the server nodes:
@@ -351,7 +352,9 @@ The test drive shows that the pipeline works. Before you rely on it in productio
 | ☐ | Events arrive continuously | `security_events_total` increases; `SecurityMonitorNoEvents` (step 9) is active |
 | ☐ | Alerts reach a person | Alertmanager routes `SecurityAlertCritical` to on-call, `SecurityAlertHigh` to a channel |
 | ☐ | Own traffic is allow-listed | Uptime checks, load balancer health checks and your own vulnerability scanners in `except` (Kit C), or they trigger `RapidFire` / `ScannerUserAgent` |
-| ☐ | Memory fits the traffic | Requests per day × retention fits `MAX_EVENTS` (≈ 0.9 KiB per event); `SecurityMonitorEvictingEarly` is quiet |
+| ☐ | Storage fits the traffic | Requests per day × retention fits `MAX_EVENTS` and the volume (≈ 0.6 KiB per event on disk); `SecurityMonitorEvictingEarly` is quiet |
+| ☐ | Data volume is safe | PVC `security-monitor-data` is bound on block storage (Longhorn); backups via Litestream or volume snapshots ([care instructions](kubernetes-setup.md#care-instructions-)) |
+| ☐ | Web UI not exposed in plain HTTP | Reached via `kubectl port-forward` ([care instructions](kubernetes-setup.md#care-instructions-)); if routed through the gateway, only with TLS and an IP allow-list; `ui-password` is random and long |
 | ☐ | Keys are per client and stored | One key per client in a secret store; rotation tried once ([care instructions](kubernetes-setup.md#care-instructions-)) |
 | ☐ | AI analysis decided | With: secret contains the key, HTTPS egress stays. Without: remove the port-443 egress rule from the NetworkPolicy |
 
@@ -432,7 +435,7 @@ Then a compromised pod that probes other services for `/.env`, SQL injection or 
 
 Two things to be aware of:
 
-- **Volume.** Every internal request becomes an event, and a request through the gateway shows up twice (once at the gateway, once at the service's sidecar). Size `MAX_EVENTS` and memory for it.
+- **Volume.** Every internal request becomes an event, and a request through the gateway shows up twice (once at the gateway, once at the service's sidecar). Size `MAX_EVENTS` and the data volume for it.
 - **Noise.** Chatty internal clients trip the threshold rules. Exclude the pod network from rules that only make sense for external clients, e.g. in `RapidFire` and `DirectoryEnumeration`:
   ```json
   "when": { "except": [{ "ip": ["10.42.0.0/16"] }] }

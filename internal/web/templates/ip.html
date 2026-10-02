@@ -1,0 +1,19 @@
+{{define "content"}}
+<h1 class="mono">{{.IP}}</h1>
+{{template "results" .}}
+{{end}}
+
+{{define "results"}}
+<div id="results">
+  <section class="card">
+    <h2>Alerts <span class="muted small">{{len .Alerts.Items}} of {{.Alerts.Total}}</span>
+      {{if gt .Alerts.Total (len .Alerts.Items)}}<a class="small" href="{{alertsURL "ip" .IP "limit" "1000"}}">more →</a>{{end}}</h2>
+    {{template "alert-list" .Alerts.Items}}
+  </section>
+  <section class="card">
+    <h2>Events <span class="muted small">{{len .Events.Items}} of {{.Events.Total}}, by event time</span>
+      {{if gt .Events.Total (len .Events.Items)}}<a class="small" href="{{eventsURL "ip" .IP "limit" "1000"}}">more →</a>{{end}}</h2>
+    {{template "event-table" .Events.Items}}
+  </section>
+</div>
+{{end}}

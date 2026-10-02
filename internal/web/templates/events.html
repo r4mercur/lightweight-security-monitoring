@@ -1,0 +1,31 @@
+{{define "content"}}
+<h1>Events</h1>
+<form class="filters" action="/ui/events" method="get"
+      hx-get="/ui/events" hx-target="#results" hx-push-url="true" hx-trigger="change, submit">
+  <label>Source IP <input type="text" name="ip" value="{{.Form.IP}}" placeholder="any" autocomplete="off" spellcheck="false"></label>
+  <label>Type
+    <select name="type">
+      <option value="">any</option>
+      {{range .Types}}<option{{if eq (print .) $.Form.Type}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  </label>
+  <label>Show
+    <select name="limit">
+      {{range limits}}<option{{if eq . $.Form.Limit}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  </label>
+  <div class="actions">
+    <button type="submit">Filter</button>
+    <a class="button secondary" href="/ui/events">Reset</a>
+  </div>
+</form>
+{{template "results" .}}
+{{end}}
+
+{{define "results"}}
+<div id="results">
+  {{template "errors" .Errors}}
+  <p class="count">{{len .Result.Items}} of {{.Result.Total}} events, newest first{{if .Form.IP}} (by event time){{else}} (by arrival){{end}}.</p>
+  {{template "event-table" .Result.Items}}
+</div>
+{{end}}
