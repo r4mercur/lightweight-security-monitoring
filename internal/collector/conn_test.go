@@ -2,6 +2,7 @@ package collector
 
 import (
 	"encoding/binary"
+	"fmt"
 	"lightweight-security-monitoring/internal/domain"
 	"net"
 	"net/netip"
@@ -154,6 +155,21 @@ func TestConnTracker(t *testing.T) {
 	}
 }
 
+// /proc/net/tcp can list a socket twice when the table changes while it is
+// read; each socket must still become one event.
+func TestConnTracker_DuplicatesInOneSnapshot(t *testing.T) {
+	tr := &connTracker{}
+	listener := socket{Proto: "tcp", Local: ap("0.0.0.0:443"), State: stateListen}
+	tr.update([]socket{listener})
+
+	backdoor := socket{Proto: "tcp", Local: ap("0.0.0.0:31337"), State: stateListen}
+	conn := socket{Proto: "tcp", Local: ap("10.0.0.5:50000"), Remote: ap("203.0.113.9:4444"), State: stateEstablished}
+	added, _ := tr.update([]socket{listener, backdoor, conn, backdoor, conn, conn})
+	if len(added) != 2 {
+		t.Errorf("duplicates reported: %d sockets added, want 2", len(added))
+	}
+}
+
 func TestConnTracker_IncludeLoopback(t *testing.T) {
 	tr := &connTracker{includeLoopback: true}
 	added, _ := tr.update([]socket{{Proto: "tcp", Local: ap("127.0.0.1:50001"), Remote: ap("127.0.0.1:5432"), State: stateEstablished}})
@@ -190,16 +206,26 @@ func TestConnSource_Live(t *testing.T) {
 	}
 	listenAddr := ap(ln.Addr().String())
 	clientAddr := ap(conn.LocalAddr().String())
-	var mine []*socket
+	var listener, client *socket
+	var found []string
 	for i := range socks {
 		s := &socks[i]
-		if (s.State == stateListen && s.Local == listenAddr) || (s.Local == clientAddr && s.Remote == listenAddr) {
-			mine = append(mine, s)
+		switch {
+		case s.State == stateListen && s.Local == listenAddr:
+			listener = s
+		case s.Local == clientAddr && s.Remote == listenAddr:
+			client = s
+		default:
+			continue
 		}
+		found = append(found, fmt.Sprintf("%s %s→%s inode=%s", s.State, s.Local, s.Remote, s.Inode))
 	}
-	if len(mine) != 2 {
-		t.Fatalf("expected our listener and client connection among %d sockets, found %d", len(socks), len(mine))
+	// Other processes (e.g. parallel test packages) change the table while it
+	// is read, so a socket may be listed twice; it must be listed at all.
+	if listener == nil || client == nil {
+		t.Fatalf("listener %s and client %s not both among %d sockets; matching: %v", listenAddr, clientAddr, len(socks), found)
 	}
+	mine := []*socket{listener, client}
 
 	src.resolve(mine)
 	for _, s := range mine {
