@@ -11,6 +11,7 @@ import (
 	"lightweight-security-monitoring/internal/metrics"
 	"lightweight-security-monitoring/internal/repository"
 	"lightweight-security-monitoring/internal/service"
+	"lightweight-security-monitoring/internal/web"
 	"lightweight-security-monitoring/pkg/logger"
 	"log/slog"
 	"net"
@@ -52,11 +53,18 @@ func main() {
 
 	// ── Infrastructure ───────────────────────────────────────────────────────
 	m := metrics.NewMetrics()
-	store := repository.NewMemoryStore(
-		repository.WithRetention(storage.eventRetention, storage.alertRetention),
-		repository.WithCapacity(storage.maxEvents, storage.maxAlerts),
-		repository.WithEvictionFunc(m.RecordEviction),
-	)
+	store, err := openStore(storage, m.RecordEviction, func(err error) {
+		log.Error("writing to storage failed", slog.String("error", err.Error()))
+	})
+	if err != nil {
+		log.Error("opening storage failed", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Error("closing storage failed", slog.String("error", err.Error()))
+		}
+	}()
 	m.ObserveStorage(func() (int, int, int) {
 		s := store.Stats()
 		return s.Events, s.EventIPs, s.Alerts
@@ -86,7 +94,11 @@ func main() {
 			slog.String("alert_retention", storage.alertRetention.String()), slog.String("required", lookback.String()))
 		os.Exit(1)
 	}
-	log.Info("storage configured",
+	backend := "memory"
+	if storage.dbPath != "" {
+		backend = "sqlite " + storage.dbPath
+	}
+	log.Info("storage configured", slog.String("backend", backend),
 		slog.String("event_retention", storage.eventRetention.String()), slog.Int("max_events", storage.maxEvents),
 		slog.String("alert_retention", storage.alertRetention.String()), slog.Int("max_alerts", storage.maxAlerts),
 	)
@@ -130,6 +142,28 @@ func main() {
 	handler := api.NewHandler(ingestion, store, store, log)
 	router := api.SetupRoutes(handler, m, auth)
 
+	// ── Web UI ───────────────────────────────────────────────────────────────
+	uiUser, uiPassword := envOr("UI_USER", "admin"), os.Getenv("UI_PASSWORD")
+	if uiPassword != "" {
+		ui, err := web.New(web.Config{User: uiUser, Password: uiPassword, Store: store, Rules: rules.Specs, Logger: log})
+		if err != nil {
+			log.Error("invalid web UI configuration", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		root := http.NewServeMux()
+		root.Handle("/", router)
+		root.Handle(web.Prefix, ui)
+		root.Handle("GET /{$}", http.RedirectHandler(web.Prefix, http.StatusFound))
+		router = root
+		if len(uiPassword) < minUIPasswordLength {
+			log.Warn("UI_PASSWORD is short - the web UI is only protected by this password",
+				slog.Int("length", len(uiPassword)), slog.Int("recommended", minUIPasswordLength))
+		}
+		log.Info("web UI enabled", slog.String("path", web.Prefix), slog.String("user", uiUser))
+	} else {
+		log.Info("web UI disabled - set UI_PASSWORD to enable it")
+	}
+
 	// ── Run until SIGINT/SIGTERM ─────────────────────────────────────────────
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -140,7 +174,9 @@ func main() {
 	}
 	wg.Go(func() {
 		runJanitor(ctx, janitorInterval, func(now time.Time) {
-			store.Prune(now)
+			if err := store.Prune(now); err != nil {
+				log.Error("pruning storage failed", slog.String("error", err.Error()))
+			}
 			engine.Prune(now)
 		})
 	})
@@ -214,6 +250,9 @@ func loadCollectors(path string, sink collector.Sink, rec collector.LineRecorder
 	return collectors, nil
 }
 
+// minUIPasswordLength is the UI_PASSWORD length below which a warning is logged.
+const minUIPasswordLength = 16
+
 // janitorInterval is how often expired events, alerts and rule state are released.
 const janitorInterval = time.Minute
 
@@ -230,13 +269,40 @@ func runJanitor(ctx context.Context, interval time.Duration, prune func(now time
 	}
 }
 
+// store is implemented by repository.MemoryStore and repository.SQLiteStore.
+type store interface {
+	repository.EventRepository
+	repository.AlertRepository
+	SummarizeAlerts(ctx context.Context, since time.Time) (repository.AlertSummary, error)
+	Prune(now time.Time) error
+	Stats() repository.Stats
+	Close() error
+}
+
+// openStore opens the SQLite database at DB_PATH, or keeps everything in memory without it.
+func openStore(cfg storageConfig, onEvict repository.EvictionFunc, onError func(error)) (store, error) {
+	opts := []repository.Option{
+		repository.WithRetention(cfg.eventRetention, cfg.alertRetention),
+		repository.WithCapacity(cfg.maxEvents, cfg.maxAlerts),
+		repository.WithEvictionFunc(onEvict),
+		repository.WithErrorFunc(onError),
+	}
+	if cfg.dbPath == "" {
+		return repository.NewMemoryStore(opts...), nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return repository.OpenSQLiteStore(ctx, cfg.dbPath, opts...)
+}
+
 type storageConfig struct {
+	dbPath                         string
 	eventRetention, alertRetention time.Duration
 	maxEvents, maxAlerts           int
 }
 
-// storageConfigFromEnv reads EVENT_RETENTION, ALERT_RETENTION, MAX_EVENTS and
-// MAX_ALERTS. A value of 0 disables the respective limit.
+// storageConfigFromEnv reads DB_PATH, EVENT_RETENTION, ALERT_RETENTION,
+// MAX_EVENTS and MAX_ALERTS. A value of 0 disables the respective limit.
 func storageConfigFromEnv() (storageConfig, error) {
 	var (
 		cfg  storageConfig
@@ -265,6 +331,7 @@ func storageConfigFromEnv() (storageConfig, error) {
 		return n
 	}
 
+	cfg.dbPath = os.Getenv("DB_PATH")
 	cfg.eventRetention = duration("EVENT_RETENTION", repository.DefaultEventRetention)
 	cfg.alertRetention = duration("ALERT_RETENTION", repository.DefaultAlertRetention)
 	cfg.maxEvents = integer("MAX_EVENTS", repository.DefaultMaxEvents)

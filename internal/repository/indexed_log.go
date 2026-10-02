@@ -152,20 +152,50 @@ func (l *indexedLog[T]) since(key string, t time.Time) []T {
 
 // newest returns up to limit items, newest first, plus the number of items
 // that match. With a key, items are ordered by timestamp; without, by insertion.
-func (l *indexedLog[T]) newest(key string, limit int) (items []T, total int) {
+// A non-nil match filters the items; counting them then scans all candidates.
+func (l *indexedLog[T]) newest(key string, limit int, match func(T) bool) (items []T, total int) {
+	visit := func(v T) bool { // reports whether to continue
+		if match != nil && !match(v) {
+			return true
+		}
+		total++
+		if len(items) < limit {
+			items = append(items, v)
+		}
+		return match != nil || len(items) < limit
+	}
+
 	if key != "" {
 		s := l.byKey[key]
-		for i := len(s) - 1; i >= 0 && len(items) < limit; i-- {
-			items = append(items, s[i].val)
+		for _, v := range slices.Backward(s) {
+			if !visit(v.val) {
+				break
+			}
 		}
-		return items, len(s)
+		if match == nil {
+			total = len(s)
+		}
+		return items, total
 	}
-	for i := len(l.order) - 1; i >= l.head && len(items) < limit; i-- {
-		if e := l.order[i]; e != nil && !e.removed {
-			items = append(items, e.val)
+	for i := len(l.order) - 1; i >= l.head; i-- {
+		if e := l.order[i]; e != nil && !e.removed && !visit(e.val) {
+			break
 		}
 	}
-	return items, l.live
+	if match == nil {
+		total = l.live
+	}
+	return items, total
+}
+
+// eachSince calls fn for every item with a timestamp after t, in no particular order.
+func (l *indexedLog[T]) eachSince(t time.Time, fn func(T)) {
+	for _, s := range l.byKey {
+		i := sort.Search(len(s), func(i int) bool { return s[i].ts.After(t) })
+		for _, e := range s[i:] {
+			fn(e.val)
+		}
+	}
 }
 
 func (l *indexedLog[T]) len() int  { return l.live }

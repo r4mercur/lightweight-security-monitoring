@@ -29,7 +29,7 @@ Steps 1–8, the test drive and the DNS kit were assembled and tested end to end
 | Part | File | |
 |------|------|--|
 | A | Namespace with the strictest Pod Security Standard | [`deploy/kubernetes/namespace.yaml`](../deploy/kubernetes/namespace.yaml) |
-| B | Monitor: Deployment, Service, ServiceAccount | [`deploy/kubernetes/deployment.yaml`](../deploy/kubernetes/deployment.yaml) |
+| B | Monitor: Deployment, data volume (PVC), Service, ServiceAccount | [`deploy/kubernetes/deployment.yaml`](../deploy/kubernetes/deployment.yaml) |
 | C | NetworkPolicy ("who may talk to the monitor") | [`deploy/kubernetes/networkpolicy.yaml`](../deploy/kubernetes/networkpolicy.yaml) |
 | D | Kustomization tying A–C together | [`deploy/kubernetes/kustomization.yaml`](../deploy/kubernetes/kustomization.yaml) |
 | E | ingress-nginx values (access log format) | [`deploy/kubernetes/ingress-nginx-values.yaml`](../deploy/kubernetes/ingress-nginx-values.yaml) |
@@ -42,11 +42,14 @@ Steps 1–8, the test drive and the DNS kit were assembled and tested end to end
 - `kubectl`, `helm`, `docker` and a container registry the cluster can pull from
 - A cluster running **ingress-nginx** as the entry point for your microservices (Istio instead? See [RKE2 with Istio instead of an Ingress controller](rke2-istio-instead-of-ingress.md))
 - A CNI that **enforces NetworkPolicies** (Calico, Cilium, most managed clusters; *not* kind's default)
+- A default StorageClass with **block storage** for the 2 GiB data volume (Longhorn, Ceph RBD, a cloud disk, local-path; *not* NFS, see below)
 - Optional: the Prometheus Operator (e.g. kube-prometheus-stack), an Anthropic API key
 
 ## ⚠️ Read this before you start
 
-> **1 × monitor, not 3.** Events, alerts and rule windows live in memory. Run exactly one replica (the Deployment does). A restart forgets the history — forward alerts to Prometheus/Alertmanager (step 9) so nothing important only lives in the monitor.
+> **1 × monitor, not 3.** Rule windows live in memory and the SQLite database allows one writer. With three replicas the events of one attacker would be spread across three pods and none would reach a threshold. Run exactly one replica (the Deployment does); why that is enough is explained in the README under [Storage](../README.md#why-sqlite-and-a-single-instance). Events and alerts survive restarts on the data volume; rule windows start empty.
+
+> **Block storage, not NFS.** SQLite's file locking does not work on network file systems (NFS, CephFS, Azure Files, EFS) and the database can be corrupted. Use a `ReadWriteOnce` volume from a block storage class. With local-path the data is bound to one node; the pod cannot move if that node fails.
 
 > **The real client IP or nothing.** Every rule counts per IP. If the ingress sees your load balancer's IP instead of the client's, all traffic looks like one very busy client. Step 5 shows the switch.
 
@@ -70,7 +73,7 @@ images:
     newTag: "1.0.0"
 ```
 
-✅ **Check:** `docker images` lists the image (~25 MB).
+✅ **Check:** `docker images` lists the image (~30 MB).
 
 ## Step 2 — Unfold the namespace 📂
 
@@ -91,10 +94,11 @@ FLUENTBIT_KEY=$(openssl rand -hex 32)
 SHOP_KEY=$(openssl rand -hex 32)
 
 kubectl -n security create secret generic security-monitor \
-  --from-literal=api-keys="$FLUENTBIT_KEY,$SHOP_KEY"
+  --from-literal=api-keys="$FLUENTBIT_KEY,$SHOP_KEY" \
+  --from-literal=ui-password="$(openssl rand -base64 24)"
 ```
 
-Keep both values; steps 6 and 7 hand them to the clients.
+Keep both keys; steps 6 and 7 hand them to the clients. `ui-password` switches on the web UI (user `admin`); leave it out to run without UI. How to open it: [care instructions](#care-instructions-).
 
 ✅ **Check:** `kubectl -n security get secret security-monitor` exists.
 
@@ -105,7 +109,7 @@ kubectl apply -k deploy/kubernetes
 kubectl -n security rollout status deployment/security-monitor
 ```
 
-This creates the Deployment (1 replica, `Recreate` updates, 256–512 MiB memory), the Service `security-monitor:8080` and the NetworkPolicy.
+This creates the data volume (2 GiB PVC), the Deployment (1 replica, `Recreate` updates, 256–512 MiB memory, SQLite database at `/data/monitoring.db`), the Service `security-monitor:8080` and the NetworkPolicy. If the pod stays `Pending`, the PVC found no StorageClass: `kubectl -n security get pvc`.
 
 ✅ **Check:**
 
@@ -241,7 +245,7 @@ With the Prometheus Operator, enable [`monitoring.yaml`](../deploy/kubernetes/mo
 | `SecurityAlertHigh` | a high alert (SQL injection, brute force, port scan, DNS tunneling, …) occurred |
 | `SecurityMonitorNoEvents` | no events for 15 minutes — the log shipper or ingress logging is broken |
 | `SecurityMonitorDown` | the monitor is not reachable |
-| `SecurityMonitorEvictingEarly` | memory is too small for the event volume (raise `MAX_EVENTS` and the memory limit) |
+| `SecurityMonitorEvictingEarly` | the store is too small for the event volume (raise `MAX_EVENTS` and the volume size) |
 
 Prometheus only knows *that* something happened. The details — which IP, which rule, which service — are in the monitor: `GET /alerts`.
 
@@ -273,6 +277,8 @@ curl -s -H "Authorization: Bearer $SHOP_KEY" "localhost:8080/alerts?limit=10"
 | medium | `ScannerUserAgent` | `sqlmap` |
 | medium | `SensitivePath` | `/.env` |
 
+With `ui-password` set, open `http://localhost:8080/ui/` instead: the overview lists the attacker pod's IP at the top, its page shows the five alerts next to the requests that caused them.
+
 **Done.** 🎉 Your namespace is watched.
 
 ---
@@ -298,7 +304,7 @@ The ingress only sees traffic *into* the cluster. A compromised pod smuggling da
 
 ✅ **Check:** a pod querying 50 different subdomains of one domain within a minute raises `DNSTunneling` (tested: `50 distinct subdomains of evil-example.net queried by 10.244.0.16`).
 
-> The alert names the **pod IP**. Pod IPs change; look it up soon: `kubectl get pods -A -o wide | grep <ip>`. Every DNS query becomes an event — size `MAX_EVENTS` and the memory limit for your query rate.
+> The alert names the **pod IP**. Pod IPs change; look it up soon: `kubectl get pods -A -o wide | grep <ip>`. Every DNS query becomes an event — size `MAX_EVENTS` and the data volume for your query rate.
 
 ### Kit B — AI analysis 🤖
 
@@ -329,18 +335,19 @@ patches:
       kind: Deployment
       name: security-monitor
     patch: |-
+      # "/-" appends: the data volume and its mount must stay
       - op: add
-        path: /spec/template/spec/volumes
+        path: /spec/template/spec/volumes/-
         value:
-          - name: rules
-            configMap:
-              name: security-monitor-rules
+          name: rules
+          configMap:
+            name: security-monitor-rules
       - op: add
-        path: /spec/template/spec/containers/0/volumeMounts
+        path: /spec/template/spec/containers/0/volumeMounts/-
         value:
-          - name: rules
-            mountPath: /etc/security-monitor
-            readOnly: true
+          name: rules
+          mountPath: /etc/security-monitor
+          readOnly: true
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
@@ -378,17 +385,31 @@ Be honest with yourself about the blind spots:
 
 **Looking at alerts**
 
+In the browser, through a port-forward — the tunnel runs over the API server's TLS connection, needs no change to the NetworkPolicy and keeps the UI off any public address:
+
 ```bash
+kubectl -n security get secret security-monitor -o jsonpath='{.data.ui-password}' | base64 -d; echo
 kubectl -n security port-forward svc/security-monitor 8080:8080
-curl -s -H "Authorization: Bearer $SHOP_KEY" "localhost:8080/alerts?limit=20"
-curl -s -H "Authorization: Bearer $SHOP_KEY" "localhost:8080/alerts?ip=203.0.113.77"
+# open http://localhost:8080/ui/ — user admin, the password from above
 ```
 
-**Updating** — push a new image tag, set it in `kustomization.yaml`, `kubectl apply -k deploy/kubernetes`. The pod is replaced (`Recreate`); Fluent Bit retries while it restarts, so no events are lost, but the in-memory history starts fresh.
+Or with the API, filtered by IP, severity or rule:
+
+```bash
+curl -s -H "Authorization: Bearer $SHOP_KEY" "localhost:8080/alerts?limit=20"
+curl -s -H "Authorization: Bearer $SHOP_KEY" "localhost:8080/alerts?ip=203.0.113.77"
+curl -s -H "Authorization: Bearer $SHOP_KEY" "localhost:8080/alerts?severity=high"
+```
+
+> Exposing the UI through the ingress instead: only with TLS (Basic Auth sends the password with every request), an extra `from` entry for the ingress controller's namespace in the NetworkPolicy, and ideally an IP allow-list on the Ingress. The port-forward is the safer default.
+
+**Updating** — push a new image tag, set it in `kustomization.yaml`, `kubectl apply -k deploy/kubernetes`. The pod is replaced (`Recreate`); Fluent Bit retries while it restarts, so no events are lost. Events and alerts stay on the data volume, so cooldowns and `MultiVector` keep their history; only the rule windows (e.g. a port scan half counted) start fresh.
 
 **Rotating a key** — add the new key to `api-keys` (`old,new`), roll out, switch the client, remove the old key, roll out again.
 
-**Sizing** — about 0.9 KiB per stored event. `MAX_EVENTS=200000` fits the 512 MiB limit; raise both together. Detection itself does not need the stored events (rules keep their own windows), so a smaller store only shortens what `GET /events` can show.
+**Sizing** — events are stored on disk, about 0.6 KiB each: `MAX_EVENTS=1000000` needs ~600 MiB of the 2 GiB volume; raise both together (PVCs can usually be expanded: edit `resources.requests.storage`). Memory is used by the rule windows, not the stored events, so the 512 MiB limit does not depend on `MAX_EVENTS`. Detection itself does not need the stored events, so a smaller store only shortens what `GET /events` can show.
+
+**Backups** — the database is a single file. For continuous backups run [Litestream](https://litestream.io) as a sidecar that replicates it to S3 or MinIO; for occasional ones, `VolumeSnapshot`s of the PVC. See the README under [Storage](../README.md#storage).
 
 **Troubleshooting**
 
@@ -399,7 +420,9 @@ curl -s -H "Authorization: Bearer $SHOP_KEY" "localhost:8080/alerts?ip=203.0.113
 | Fluent Bit cannot connect | NetworkPolicy: Fluent Bit is not in namespace `logging` | Move it or add its namespace to the policy |
 | No JSON in the ingress log | Values from step 5 not applied, or requests hit the default backend (unknown host) | `helm get values ingress-nginx -n ingress-nginx`; test with a host that has an Ingress |
 | Every alert has the same IP | The load balancer's IP, not the client's | Step 5, real client IP |
-| Pod `OOMKilled` | Event volume too high for the limit | Lower `MAX_EVENTS` or raise `limits.memory` (and `GOMEMLIMIT` to ~80 % of it) |
+| Pod `OOMKilled` | Many active IPs keep many rule windows | Raise `limits.memory` (and `GOMEMLIMIT` to ~80 % of it) |
+| Pod stays `Pending` | PVC unbound: no default StorageClass | `kubectl -n security describe pvc security-monitor-data`; set `storageClassName` in `deployment.yaml` |
+| Log shows `opening storage failed` / `database is locked` | Volume on a network file system, or not writable | Block storage class; `fsGroup: 65534` must stay in the pod's `securityContext` |
 | Service events rejected with 400 | Invalid field (e.g. `ip` missing or not an address) | The response names every invalid field |
 
 ---

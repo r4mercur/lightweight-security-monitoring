@@ -1,0 +1,31 @@
+{{define "layout" -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+{{/* No eval, no script tags from responses, no requests to other origins, no copies of pages in localStorage. */ -}}
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,"includeIndicatorStyles":false,"historyCacheSize":0,"defaultSwapStyle":"outerHTML"}'>
+<title>{{.Title}} · Security Monitor</title>
+<link rel="icon" type="image/svg+xml" href="{{static "logo.svg"}}">
+<link rel="stylesheet" href="{{static "app.css"}}">
+<script src="{{static "htmx.min.js"}}" defer></script>
+<script src="{{static "table.js"}}" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/ui/"><img src="{{static "logo.svg"}}" alt="" width="28" height="28">Security Monitor</a>
+  <nav>
+    <a href="/ui/"{{if eq .Nav "overview"}} aria-current="page"{{end}}>Overview</a>
+    <a href="/ui/alerts"{{if eq .Nav "alerts"}} aria-current="page"{{end}}>Alerts</a>
+    <a href="/ui/events"{{if eq .Nav "events"}} aria-current="page"{{end}}>Events</a>
+    <a href="/ui/rules"{{if eq .Nav "rules"}} aria-current="page"{{end}}>Rules</a>
+  </nav>
+</header>
+<main>
+{{template "content" .}}
+</main>
+</body>
+</html>
+{{- end}}

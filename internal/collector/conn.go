@@ -86,8 +86,13 @@ func (t *connTracker) update(socks []socket) (added []*socket, listenPorts map[s
 
 	for i := range socks {
 		s := &socks[i]
+		// A snapshot can list a socket twice (/proc/net/tcp repeats entries
+		// when the table changes while it is read); report it once.
 		if s.State == stateListen {
 			key := s.Proto + " " + s.Local.String()
+			if listeners[key] {
+				continue
+			}
 			listeners[key] = true
 			listenPorts[s.Proto+"/"+strconv.Itoa(int(s.Local.Port()))] = true
 			if t.primed && !t.listeners[key] {
@@ -103,6 +108,9 @@ func (t *connTracker) update(socks []socket) (added []*socket, listenPorts map[s
 		}
 		// The state is not part of the key: SYN_SENT → ESTABLISHED is the same connection.
 		key := s.Proto + " " + s.Local.String() + " " + s.Remote.String()
+		if seen[key] {
+			continue
+		}
 		seen[key] = true
 		if !t.seen[key] {
 			added = append(added, s)

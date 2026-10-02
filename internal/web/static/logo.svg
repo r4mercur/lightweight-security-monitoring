@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Security Monitor">
+  <!-- Favicon and header logo: a detective with a magnifying glass on a dark tile.
+       Shapes are kept simple so the figure still reads at 16 px. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b3547"/>
+      <stop offset="1" stop-color="#121821"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#tile)"/>
+  <!-- Thin light edge, so the tile stays visible on dark backgrounds -->
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="13.25" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="1.5"/>
+
+  <!-- Trench coat with turned-up collar -->
+  <path d="M7 64 C8 51 16 45 29 44 C42 45 50 51 51 64 Z" fill="#4b576a"/>
+  <path d="M29 44 L19 48 L24 61 L29 50 Z" fill="#8995a8"/>
+  <path d="M29 44 L39 48 L34 61 L29 50 Z" fill="#8995a8"/>
+  <path d="M29 50 L27.2 55.5 L29 60 L30.8 55.5 Z" fill="#1d2430"/>
+
+  <!-- Face in the shadow of the brim -->
+  <circle cx="29" cy="34" r="9.5" fill="#9aa6b8"/>
+  <rect x="19" y="27" width="20" height="4.5" rx="2" fill="#3a4556"/>
+
+  <!-- Fedora: crown with a dent, band, wide brim -->
+  <path d="M18.5 26 L20.5 13.5 Q24 10.5 29 12.5 Q34 10.5 37.5 13.5 L39.5 26 Z" fill="#d5dbe4"/>
+  <path d="M19.4 20.5 L38.6 20.5 L39.5 26 L18.5 26 Z" fill="#323c4d"/>
+  <ellipse cx="29" cy="26.5" rx="18" ry="3.6" fill="#d5dbe4"/>
+
+  <!-- Magnifying glass -->
+  <line x1="50.5" y1="47.5" x2="58" y2="55" stroke="#b9852a" stroke-width="5.5" stroke-linecap="round"/>
+  <circle cx="44" cy="41" r="9" fill="#7aa7ff" fill-opacity="0.28" stroke="#f2b84b" stroke-width="3.5"/>
+  <path d="M39.5 38 A5.5 5.5 0 0 1 44 35.5" fill="none" stroke="#ffffff" stroke-opacity="0.75" stroke-width="1.8" stroke-linecap="round"/>
+</svg>

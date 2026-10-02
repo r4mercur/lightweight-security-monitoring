@@ -1,0 +1,25 @@
+{{define "content"}}
+<h1>Rules</h1>
+<p class="muted">The rules loaded at startup, in file order. To change them, edit the rule file (<code>RULES_FILE</code>) and restart.</p>
+{{template "results" .}}
+{{end}}
+
+{{define "results"}}
+<div id="results" class="table-wrap">
+<table class="rules" data-resize="rules">
+  <thead><tr><th>Rule</th><th>Kind</th><th>Severity</th><th>Description</th><th>Condition</th><th>Cooldown</th></tr></thead>
+  <tbody>
+  {{range .Rules}}
+  <tr{{if .Disabled}} class="disabled"{{end}}>
+    <td class="nowrap"><a href="{{alertsURL "rule" .Name}}">{{.Name}}</a>{{if .Disabled}} <span class="muted">(disabled)</span>{{end}}</td>
+    <td>{{.Kind}}</td>
+    <td>{{template "severity" .Severity}}</td>
+    <td>{{.Description}}</td>
+    <td class="small">{{condition .}}</td>
+    <td class="nowrap">{{with .Cooldown}}{{duration .}}{{end}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}

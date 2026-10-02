@@ -96,7 +96,9 @@ func TestPrune_RemovesExpiredEventsAndAlerts(t *testing.T) {
 	_ = s.SaveAlert(context.Background(), domain.Alert{ID: "a-old", IP: "10.0.0.1", Timestamp: t0.Add(-3 * time.Hour)})
 	_ = s.SaveAlert(context.Background(), domain.Alert{ID: "a-new", IP: "10.0.0.1", Timestamp: t0.Add(-90 * time.Minute)})
 
-	s.Prune(t0)
+	if err := s.Prune(t0); err != nil {
+		t.Fatal(err)
+	}
 
 	all, _ := s.ListEvents(context.Background(), ListQuery{Limit: 10})
 	if !slices.Equal(ids(all.Items), []string{"new"}) {
@@ -189,7 +191,7 @@ func TestIndexedLog_MatchesModel(t *testing.T) {
 			for i := len(model) - 1; i >= 0 && len(newest) < 10; i-- {
 				newest = append(newest, model[i].id)
 			}
-			if got, total := l.newest("", 10); !slices.Equal(got, newest) || total != len(model) {
+			if got, total := l.newest("", 10, nil); !slices.Equal(got, newest) || total != len(model) {
 				t.Fatalf("step %d: newest = %v (%d), want %v (%d)", step, got, total, newest, len(model))
 			}
 		}

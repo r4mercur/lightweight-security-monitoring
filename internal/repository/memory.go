@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"lightweight-security-monitoring/internal/domain"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,10 +30,63 @@ type AlertRepository interface {
 // ErrNotFound is returned when a requested item does not exist.
 var ErrNotFound = errors.New("not found")
 
-// ListQuery selects the newest items, optionally for a single IP.
+// ListQuery selects the newest items, optionally for a single IP and filtered.
 type ListQuery struct {
 	IP    string
 	Limit int
+
+	EventType   domain.EventType // events only: exact event type
+	MinSeverity domain.Severity  // alerts only: at least this severity
+	Rule        string           // alerts only: trigger rule
+}
+
+func (q ListQuery) eventFilter() func(domain.Event) bool {
+	if q.EventType == "" {
+		return nil
+	}
+	return func(e domain.Event) bool { return e.EventType == q.EventType }
+}
+
+func (q ListQuery) alertFilter() func(domain.Alert) bool {
+	if q.MinSeverity == "" && q.Rule == "" {
+		return nil
+	}
+	return func(a domain.Alert) bool {
+		return a.Severity.Rank() >= q.MinSeverity.Rank() && (q.Rule == "" || a.TriggerRule == q.Rule)
+	}
+}
+
+// AlertSummary counts the alerts since a point in time.
+type AlertSummary struct {
+	Total      int
+	IPs        int // distinct source IPs
+	BySeverity map[domain.Severity]int
+	TopIPs     []Count // most alerts first, at most summaryTop
+	TopRules   []Count // by trigger rule
+}
+
+// Count is a key with its number of items.
+type Count struct {
+	Key   string
+	Count int
+}
+
+// summaryTop is the length of the top lists in an AlertSummary.
+const summaryTop = 10
+
+// topCounts sorts counts by count (descending), then key, and keeps the first n.
+func topCounts(counts map[string]int, n int) []Count {
+	out := make([]Count, 0, len(counts))
+	for k, c := range counts {
+		out = append(out, Count{Key: k, Count: c})
+	}
+	slices.SortFunc(out, func(a, b Count) int {
+		if a.Count != b.Count {
+			return b.Count - a.Count
+		}
+		return strings.Compare(a.Key, b.Key)
+	})
+	return out[:min(n, len(out))]
 }
 
 // ListResult is a page of items (newest first) and the number of stored items matching the query.
@@ -67,6 +122,7 @@ type options struct {
 	maxEvents      int
 	maxAlerts      int
 	onEvict        EvictionFunc
+	onError        func(error)
 }
 
 // Option configures a MemoryStore.
@@ -85,6 +141,12 @@ func WithCapacity(maxEvents, maxAlerts int) Option {
 // WithEvictionFunc registers a callback for dropped items, e.g. for metrics.
 func WithEvictionFunc(f EvictionFunc) Option {
 	return func(o *options) { o.onEvict = f }
+}
+
+// WithErrorFunc registers a callback for errors that no caller receives, such
+// as a failed background write of buffered events (SQLiteStore only).
+func WithErrorFunc(f func(error)) Option {
+	return func(o *options) { o.onError = f }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,8 +180,9 @@ func NewMemoryStore(opts ...Option) *MemoryStore {
 	}
 }
 
-// Prune removes events and alerts older than their retention. Call it periodically.
-func (m *MemoryStore) Prune(now time.Time) {
+// Prune removes events and alerts older than their retention. Call it
+// periodically. It never fails; the error matches SQLiteStore.Prune.
+func (m *MemoryStore) Prune(now time.Time) error {
 	m.mu.Lock()
 	var events, alerts int
 	if m.opts.eventRetention > 0 {
@@ -132,7 +195,11 @@ func (m *MemoryStore) Prune(now time.Time) {
 
 	m.evicted("event", ReasonRetention, events)
 	m.evicted("alert", ReasonRetention, alerts)
+	return nil
 }
+
+// Close does nothing: stored items are lost when the process exits.
+func (m *MemoryStore) Close() error { return nil }
 
 // Stats reports the number of stored items and distinct IPs.
 type Stats struct {
@@ -164,7 +231,7 @@ func (m *MemoryStore) SaveEvent(_ context.Context, event domain.Event) error {
 func (m *MemoryStore) ListEvents(_ context.Context, q ListQuery) (ListResult[domain.Event], error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	items, total := m.events.newest(q.IP, q.Limit)
+	items, total := m.events.newest(q.IP, q.Limit, q.eventFilter())
 	return ListResult[domain.Event]{Items: items, Total: total}, nil
 }
 
@@ -187,8 +254,25 @@ func (m *MemoryStore) SaveAlert(_ context.Context, alert domain.Alert) error {
 func (m *MemoryStore) ListAlerts(_ context.Context, q ListQuery) (ListResult[domain.Alert], error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	items, total := m.alerts.newest(q.IP, q.Limit)
+	items, total := m.alerts.newest(q.IP, q.Limit, q.alertFilter())
 	return ListResult[domain.Alert]{Items: items, Total: total}, nil
+}
+
+// SummarizeAlerts counts the alerts with a timestamp after since.
+func (m *MemoryStore) SummarizeAlerts(_ context.Context, since time.Time) (AlertSummary, error) {
+	sum := AlertSummary{BySeverity: map[domain.Severity]int{}}
+	ips, rules := map[string]int{}, map[string]int{}
+	m.mu.RLock()
+	m.alerts.eachSince(since, func(a domain.Alert) {
+		sum.Total++
+		sum.BySeverity[a.Severity]++
+		ips[a.IP]++
+		rules[a.TriggerRule]++
+	})
+	m.mu.RUnlock()
+	sum.IPs = len(ips)
+	sum.TopIPs, sum.TopRules = topCounts(ips, summaryTop), topCounts(rules, summaryTop)
+	return sum, nil
 }
 
 func (m *MemoryStore) FindAlertsByIPSince(_ context.Context, ip string, since time.Time) ([]domain.Alert, error) {

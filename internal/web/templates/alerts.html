@@ -1,0 +1,46 @@
+{{define "content"}}
+<h1>Alerts</h1>
+{{/* A plain GET form: works without JavaScript; with htmx only the results are replaced and the URL is updated. */}}
+<form class="filters" action="/ui/alerts" method="get"
+      hx-get="/ui/alerts" hx-target="#results" hx-push-url="true" hx-trigger="change, submit">
+  <label>Source IP <input type="text" name="ip" value="{{.Form.IP}}" placeholder="any" autocomplete="off" spellcheck="false"></label>
+  <label>Severity at least
+    <select name="severity">
+      <option value="">any</option>
+      {{range severities}}<option value="{{.}}"{{if eq (print .) $.Form.Severity}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  </label>
+  <label>Rule
+    <select name="rule">
+      <option value="">any</option>
+      {{range .Rules}}<option{{if eq . $.Form.Rule}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  </label>
+  <label>Show
+    <select name="limit">
+      {{range limits}}<option{{if eq . $.Form.Limit}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  </label>
+  <div class="actions">
+    <button type="submit">Filter</button>
+    <a class="button secondary" href="/ui/alerts">Reset</a>
+  </div>
+</form>
+{{template "results" .}}
+{{end}}
+
+{{define "results"}}
+<div id="results">
+  {{template "errors" .Errors}}
+  <p class="count">{{len .Result.Items}} of {{.Result.Total}} alerts, newest first. Click an alert for details.</p>
+  {{/* Asks every few seconds whether a newer alert matches; the server answers 204 (nothing to do) until one does. */}}
+  <div hx-get="{{.PollURL}}" hx-trigger="every {{.PollSeconds}}s" hx-target="this"></div>
+  {{template "alert-list" .Result.Items}}
+</div>
+{{end}}
+
+{{define "new-alerts"}}
+<div class="notice info" role="status">
+  New alerts have arrived. <a href="{{alertsURL "ip" .IP "severity" .Severity "rule" .Rule}}">Show them</a>
+</div>
+{{end}}

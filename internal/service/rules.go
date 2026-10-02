@@ -234,11 +234,12 @@ func LoadRules(r io.Reader) (RuleSet, error) {
 	var set RuleSet
 	var errs []error
 	for i, spec := range file.Rules {
-		if spec.Disabled {
-			continue
-		}
 		if spec.Cooldown == nil {
 			spec.Cooldown = &cooldown
+		}
+		set.Specs = append(set.Specs, spec)
+		if spec.Disabled {
+			continue
 		}
 		if err := addRule(&set, spec); err != nil {
 			errs = append(errs, fmt.Errorf("rule #%d %q: %w", i+1, spec.Name, err))
